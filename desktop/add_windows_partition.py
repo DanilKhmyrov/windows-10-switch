@@ -7,6 +7,10 @@
         MBR is saved next to the image first, and the table is written last, so an interrupted
         run leaves the old layout in place. Whatever was stored in that area is overwritten.
 
+    sudo python3 -I add_windows_partition.py settype DISK SIZE_BYTES SLOT TYPE BACKUP_FILE
+        Changes only the MBR type byte of partition SLOT (for example 0x0C: Windows creates no
+        volume for a 0xEF partition on an MBR disk, so setup cannot find its boot partition).
+
     sudo python3 -I add_windows_partition.py hekate DISK SIZE_BYTES BUILD_BOOT_FOLDER BL33 NAME FOLDER ICON BACKUP
         On the Hekate FAT partition (partition 1): puts the boot manager and BCD from
         BUILD_BOOT_FOLDER/EFI/Microsoft/Boot into EFI/Microsoft/Boot with the marker file
@@ -96,6 +100,30 @@ def partition(disk, expected, slot, start_mib, image):
     subprocess.run(["diskutil", "mountDisk", f"/dev/{disk}"])
 
 
+def settype(disk, expected, slot, kind, backup):
+    """Changes only the type byte of MBR entry SLOT (contents are untouched); saves the MBR first."""
+    check_card(disk, expected)
+    subprocess.run(["diskutil", "unmountDisk", f"/dev/{disk}"], check=True)
+    fd = os.open(f"/dev/r{disk}", os.O_RDWR)
+    try:
+        mbr = bytearray(os.pread(fd, SECTOR, 0))
+        if mbr[510:512] != b"\x55\xaa":
+            raise SystemExit("No MBR signature")
+        old = mbr[446 + 16 * (slot - 1) + 4]
+        if not old:
+            raise SystemExit(f"Partition {slot} is empty")
+        open(backup, "wb").write(bytes(mbr))
+        mbr[446 + 16 * (slot - 1) + 4] = kind
+        os.pwrite(fd, bytes(mbr), 0)
+        os.fsync(fd)
+        if os.pread(fd, SECTOR, 0) != bytes(mbr):
+            raise SystemExit("ERROR: MBR mismatch after writing")
+    finally:
+        os.close(fd)
+    print(f"DONE: partition {slot} type {old:#04x} -> {kind:#04x} (old MBR saved to {backup})")
+    subprocess.run(["diskutil", "mountDisk", f"/dev/{disk}"])
+
+
 # Boot manager files needed for a small Hekate partition (64 MiB on the test card); the
 # remaining language folders and memtest are optional.
 BOOT_FILES = ("bootmgfw.efi", "BCD", "boot.stl")
@@ -162,13 +190,16 @@ def hekate(disk, expected, boot, bl33, name, folder, icon, backup):
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ("partition", "hekate"):
+    if len(sys.argv) < 2 or sys.argv[1] not in ("partition", "hekate", "settype"):
         raise SystemExit(__doc__)
     if os.geteuid() != 0:
         raise SystemExit("Run with sudo")
     if sys.argv[1] == "partition":
         disk, expected, slot, start_mib, image = sys.argv[2:7]
         partition(disk, expected, int(slot), int(start_mib), image)
+    elif sys.argv[1] == "settype":
+        disk, expected, slot, kind, backup = sys.argv[2:7]
+        settype(disk, expected, int(slot), int(kind, 0), backup)
     else:
         hekate(*sys.argv[2:10])
 
