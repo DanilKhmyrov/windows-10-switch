@@ -143,7 +143,7 @@ space.
    Note the four numbers it prints at the end: disk signature, Windows partition start, boot
    partition start, Windows partition size.
 3. **Put Hekate back** onto the `SWITCH` partition (the files from a Hekate release), then unzip
-   `windows-10-switch-arm64-*.zip` from the [Releases](../../releases) page onto it. Copy `bl31.bin`
+   `windows-10-switch-arm64-loader-*.zip` from the [Releases](../../releases) page onto it. Copy `bl31.bin`
    from a Switchroot L4T Ubuntu release (`switchroot/ubuntu/bl31.bin`) into `wp64/`.
 4. **Get Windows 10 22H2 ARM64** as an ESD or WIM from Microsoft (for example through UUP dump), and
    find the Pro edition index with `wimlib-imagex info file.esd`.
@@ -158,10 +158,15 @@ space.
    ```bash
    sudo python3 -I desktop/setup_card.py install diskN <size in bytes> /path/to/output
    ```
+   Then unzip `windows-10-switch-arm64-drivers-*.zip` from the Releases page onto the `WINBOOT`
+   partition (it creates `agent\arm64\` with the touch and battery drivers). If you built the
+   drivers yourself into `drivers/out/arm64/`, `build_w64.sh` has already put them there.
 7. **Boot** *Windows 10 ARM64* from Hekate's Launch menu. The screen stays black for about 10 s,
    then UEFI marks, the Windows logo and setup. The first boot takes 30-60 minutes and reboots
    by itself; pick the entry again if Hekate comes back. It ends on the desktop with autologon as
-   `Player`. Logs are in `agent\` on the `WINBOOT` partition.
+   `Player`. On the first desktop boot the agent installs the touch and battery drivers and
+   reboots once more; after that, touch and the battery icon work. Logs are in `agent\` on the
+   `WINBOOT` partition.
 
 ## SD card layout (MBR)
 
