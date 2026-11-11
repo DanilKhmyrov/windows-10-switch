@@ -121,7 +121,7 @@ reg query HKLM\SYSTEM\CurrentControlSet\Services\%1 /v ImagePath >nul 2>&1 && (
 )
 goto :eof
 
-rem OneDrive off. The policy only stops syncing; the x86 installer (SysWOW64\OneDriveSetup.exe,
+rem OneDrive off (and per-user settings, see :odkey). The policy only stops syncing; the x86 installer (SysWOW64\OneDriveSetup.exe,
 rem emulated, very slow here) still runs at every logon from each user's Run key. So: stop it,
 rem disable the installer file, remove the Run entries of every profile and the update tasks.
 :onedrive
@@ -150,9 +150,11 @@ reg unload HKU\SwProfile >nul 2>&1
 goto :eof
 
 :odkey
-echo   run keys of %~1 >> %LOG%
+echo   user keys of %~1 >> %LOG%
 reg delete "%~1\Software\Microsoft\Windows\CurrentVersion\Run" /v OneDriveSetup /f >> %LOG% 2>nul
 reg delete "%~1\Software\Microsoft\Windows\CurrentVersion\Run" /v OneDrive /f >> %LOG% 2>nul
+rem Touch keyboard button in the taskbar tray ("Always"), as there is no physical keyboard.
+reg add "%~1\Software\Microsoft\TabletTip\1.7" /v TipbandDesiredVisibility /t REG_DWORD /d 1 /f >> %LOG% 2>nul
 goto :eof
 
 rem Wi-Fi (Windows 11 only; the device ACPI\SWOA0D01 exists only with a Wi-Fi UEFI build).
