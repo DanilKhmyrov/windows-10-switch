@@ -11,7 +11,7 @@ Native Windows 10 on the Nintendo Switch: no emulation, no Linux underneath. Hek
 own EL2 shim, the shim starts a patched [NintendoSwitchPkg](https://github.com/imbushuo/NintendoSwitchPkg)
 UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 
-| Windows 10 ARM32 (build 15035) | ARM32 Start menu and Action Center | Windows 10 ARM64 (22H2) |
+| Windows 10 ARM32 (build 15035) | ARM32 Start menu and Action Center | Windows 10 ARM64 (22H2), Start menu opened by touch |
 |:---:|:---:|:---:|
 | ![ARM32 desktop](docs/screenshots/arm32-desktop.jpg) | ![ARM32 Start menu](docs/screenshots/arm32-start-menu.jpg) | ![ARM64 desktop](docs/screenshots/arm64-desktop.jpg) |
 
@@ -22,7 +22,7 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 > **Experimental, for developers.** This is a research project, not a polished installer.
 > The ARM64 path below is scripted end to end, but so far it has only been run on the author's
 > card, which was set up step by step; the clean-card path was tested on a disk image, not on a
-> second console. Windows boots to the desktop, but without touch or USB there is no input yet.
+> second console. Touch works on both; there is no USB yet.
 > The ARM32 path depends on a rare 15035 build and an IoT Core BCD and is documented for reference.
 
 ## Status
@@ -33,8 +33,8 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 | Boot to desktop | yes, autologon as user `Player` | yes, autologon as user `Player` |
 | CPU cores | 1 | 4 at ~1786 MHz (via PSCI trapping in the shim) |
 | SD card | inbox `sdbus` | inbox `sdbus` through the shim's stage-2 trap |
-| Touch screen | yes, multi-touch (`drivers/swhid`) | not yet (driver is ARM32-only so far) |
-| Battery, charger, fan, overheat shutdown | yes (`drivers/swbatt`) | not yet |
+| Touch screen | yes, multi-touch (`drivers/swhid`) | yes, same driver built for ARM64 |
+| Battery, charger, fan, overheat shutdown | yes (`drivers/swbatt`) | yes, same driver built for ARM64 |
 | CPU / RAM clocks | 1785 MHz at 1120 mV / ~1600 MHz | same UEFI code |
 | Display | GOP framebuffer (Basic Display), portrait | same |
 | USB, Wi-Fi, Bluetooth, audio, GPU | no | no |
@@ -115,13 +115,18 @@ Microsoft images inside a Linux container (`ntfs-3g`, `hivex`, `wimlib`):
 
 ### Drivers (`drivers/`)
 
-KMDF/WDM drivers built in Docker with an extracted Enterprise WDK (not included), test-signed:
+WDM drivers built in Docker with clang/lld against the Enterprise WDK 14393 headers (not included),
+test-signed:
 
 - `swhid`: HID touch screen digitizer for the FTS4 panel on I2C3 (up to 5 fingers);
 - `swbatt`: battery class miniport (MAX17050 fuel gauge, BQ24193 charger, TMP451 temperature),
   fan curve and overheat shutdown.
 
-Both are ARM32 only for now; ARM64 builds are next.
+`ARCH=arm64 drivers/build.sh` builds the same sources for ARM64. The 14393 headers already
+support ARM64. Instead of WDK libraries, the import libraries are generated from the export tables
+of the real ARM64 `ntoskrnl.exe`, `hal.dll`, `battc.sys` and `hidclass.sys` taken from the Windows
+image. On ARM64, `w64.cmd` installs both drivers from `agent\arm64\` on the boot partition, binds
+`ACPI\SWTS0001` and creates `ROOT\SWBATT`, then reboots once.
 
 ## Getting started: Windows 10 ARM64
 
@@ -226,10 +231,13 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
   `HKLM\SYSTEM\Setup\Status\ChildCompletion\setup.exe = 3`.
 - **BCD `truncatememory` is not honoured** by ARM64 Windows for DMA buffers.
 - Moving the 64-bit UEFI's memory region below 4 GB breaks its early start.
+- **ARM64 drivers failed with STATUS_DRIVER_UNABLE_TO_LOAD** (Kernel-PnP event 219): ARM64 code is
+  PC-relative, so lld emitted no `.reloc` section, and the kernel will not load a driver it cannot
+  relocate. One absolute pointer in the image forces a relocation table.
 
 ## Roadmap
 
-- ARM64: ARM64 builds of `swhid` and `swbatt`, cheaper SD capability masking (drop the full SD page trap).
+- ARM64: cheaper SD capability masking (drop the full SD page trap).
 - USB host (XUSB firmware load in UEFI + inbox XHCI), then networking.
 - Wi-Fi, Bluetooth and audio. [winx](https://github.com/steck0714/winx) has GPL-2.0 ARM64
   drivers for these, to be reviewed and ported.
