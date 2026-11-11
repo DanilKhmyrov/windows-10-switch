@@ -1,5 +1,5 @@
 @echo off
-rem Windows 10 ARM64 on the Switch: settings, drivers and diagnostics. Started by swagent on every
+rem Windows 10/11 ARM64 on the Switch: settings, drivers and diagnostics. Started by swagent on every
 rem boot with the boot partition's drive letter as %1. Logs go to %1:\agent\w64-log.txt.
 set LOG=%1:\agent\w64-log.txt
 echo ==== BOOT %date% %time% >> %LOG%
@@ -22,12 +22,7 @@ powercfg /change disk-timeout-dc 0 >> %LOG% 2>&1
 powercfg /hibernate off >> %LOG% 2>&1
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance" /v MaintenanceDisabled /t REG_DWORD /d 1 /f >> %LOG% 2>&1
 reg add HKLM\SYSTEM\CurrentControlSet\Control\CrashControl /v CrashDumpEnabled /t REG_DWORD /d 3 /f >> %LOG% 2>&1
-rem OneDrive off: policy, and no first-logon installer for new users (default profile).
-reg add HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive /v DisableFileSyncNGSC /t REG_DWORD /d 1 /f >> %LOG% 2>&1
-reg load HKU\SwDefault C:\Users\Default\NTUSER.DAT >nul 2>&1 && (
-  reg delete HKU\SwDefault\Software\Microsoft\Windows\CurrentVersion\Run /v OneDriveSetup /f >nul 2>&1
-  reg unload HKU\SwDefault >nul 2>&1
-)
+call :onedrive
 
 rem ---- Drivers: swhid (touch, ACPI\SWTS0001) and swbatt (battery and fan, ROOT\SWBATT) ----
 set REBOOT=
@@ -123,4 +118,38 @@ reg query HKLM\SYSTEM\CurrentControlSet\Services\%1 /v ImagePath >nul 2>&1 && (
   reg add HKLM\SYSTEM\CurrentControlSet\Services\%1 /v ImagePath /t REG_EXPAND_SZ /d \SystemRoot\System32\drivers\%NEWF% /f >> %LOG% 2>&1
   set REBOOT=1
 )
+goto :eof
+
+rem OneDrive off. The policy only stops syncing; the x86 installer (SysWOW64\OneDriveSetup.exe,
+rem emulated, very slow here) still runs at every logon from each user's Run key. So: stop it,
+rem disable the installer file, remove the Run entries of every profile and the update tasks.
+:onedrive
+echo -- onedrive >> %LOG%
+reg add HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive /v DisableFileSyncNGSC /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+taskkill /f /im OneDriveSetup.exe >> %LOG% 2>&1
+taskkill /f /im OneDrive.exe >> %LOG% 2>&1
+for %%F in (C:\Windows\SysWOW64\OneDriveSetup.exe C:\Windows\System32\OneDriveSetup.exe) do if exist %%F call :odfile %%F
+for /f "tokens=*" %%K in ('reg query HKU 2^>nul ^| findstr /r /c:"S-1-5-21-[0-9-]*$"') do call :odkey "%%K"
+call :odprofile "C:\Users\Default"
+for /d %%P in (C:\Users\*) do call :odprofile "%%P"
+for /f "tokens=1 delims=," %%T in ('schtasks /query /fo csv /nh 2^>nul ^| findstr /i onedrive') do schtasks /delete /tn %%T /f >> %LOG% 2>&1
+goto :eof
+
+:odfile
+takeown /f %1 >> %LOG% 2>&1
+icacls %1 /grant *S-1-5-32-544:F >> %LOG% 2>&1
+ren %1 OneDriveSetup.exe.off >> %LOG% 2>&1
+goto :eof
+
+:odprofile
+if not exist "%~1\NTUSER.DAT" goto :eof
+reg load HKU\SwProfile "%~1\NTUSER.DAT" >nul 2>&1 || goto :eof
+call :odkey HKU\SwProfile
+reg unload HKU\SwProfile >nul 2>&1
+goto :eof
+
+:odkey
+echo   run keys of %~1 >> %LOG%
+reg delete "%~1\Software\Microsoft\Windows\CurrentVersion\Run" /v OneDriveSetup /f >> %LOG% 2>nul
+reg delete "%~1\Software\Microsoft\Windows\CurrentVersion\Run" /v OneDrive /f >> %LOG% 2>nul
 goto :eof
