@@ -12,6 +12,16 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 > Mariko unit (T210B01, HAC-001-01). Clock and voltage changes stay within the limits used by
 > Horizon. Use at your own risk.
 
+> **Experimental, for developers.** This is a research project, not an installer. The code and
+> notes explain how each part works, but some steps that got the test console to the desktop
+> were done by hand and are not scripted yet:
+> - creating the SD card partition layout;
+> - the ARM32 BCD is derived from a Windows 10 IoT Core BCD;
+> - on ARM64: `sdbus`/`sdstor` set to boot-start, a drive letter for CRASHDUMP, and the BCD
+>   and setup-state fixes described under [Lessons learned](#lessons-learned).
+>
+> No prebuilt loaders are published yet. Expect to read the scripts and adapt them.
+
 ## Status
 
 | | Windows 10 ARM32 | Windows 10 ARM64 |
