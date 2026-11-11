@@ -15,6 +15,12 @@ powercfg /change disk-timeout-dc 0 >> %LOG% 2>&1
 powercfg /hibernate off >> %LOG% 2>&1
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance" /v MaintenanceDisabled /t REG_DWORD /d 1 /f >> %LOG% 2>&1
 reg add HKLM\SYSTEM\CurrentControlSet\Control\CrashControl /v CrashDumpEnabled /t REG_DWORD /d 3 /f >> %LOG% 2>&1
+rem OneDrive off: policy, and no first-logon installer for new users (default profile).
+reg add HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive /v DisableFileSyncNGSC /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+reg load HKU\SwDefault C:\Users\Default\NTUSER.DAT >nul 2>&1 && (
+  reg delete HKU\SwDefault\Software\Microsoft\Windows\CurrentVersion\Run /v OneDriveSetup /f >nul 2>&1
+  reg unload HKU\SwDefault >nul 2>&1
+)
 
 rem ---- Drivers: swhid (touch, ACPI\SWTS0001) and swbatt (battery and fan, ROOT\SWBATT) ----
 set REBOOT=

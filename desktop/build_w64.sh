@@ -81,25 +81,9 @@ hivexregedit --merge --prefix 'HKEY_LOCAL_MACHINE\SYSTEM' "$TMP/SYSTEM" "$TMP/sy
 cp "$TMP/SYSTEM" "$CONFIG/SYSTEM"; cmp "$TMP/SYSTEM" "$CONFIG/SYSTEM"
 hivexget "$CONFIG/SYSTEM" '\Setup' CmdLine
 
-# Windows 11: never ask for a network connection or a Microsoft account during setup, and no
-# OneDrive (harmless on Windows 10).
-cp "$CONFIG/SOFTWARE" "$TMP/SOFTWARE"
-cat > "$TMP/software.reg" <<'REG'
-Windows Registry Editor Version 5.00
-
-[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE]
-"BypassNRO"=dword:00000001
-
-[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\OneDrive]
-"DisableFileSyncNGSC"=dword:00000001
-REG
-hivexregedit --merge --prefix 'HKEY_LOCAL_MACHINE\SOFTWARE' "$TMP/SOFTWARE" "$TMP/software.reg"
-cp "$TMP/SOFTWARE" "$CONFIG/SOFTWARE"; cmp "$TMP/SOFTWARE" "$CONFIG/SOFTWARE"
-# OneDrive: also drop its first-logon installer from the default user profile.
-cp "$MNT/Users/Default/NTUSER.DAT" "$TMP/NTUSER.DAT"
-printf 'Windows Registry Editor Version 5.00\n\n[HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run]\n"OneDriveSetup"=-\n\n' > "$TMP/ntuser.reg"
-hivexregedit --merge --prefix 'HKEY_CURRENT_USER' "$TMP/NTUSER.DAT" "$TMP/ntuser.reg"
-cp "$TMP/NTUSER.DAT" "$MNT/Users/Default/NTUSER.DAT"; cmp "$TMP/NTUSER.DAT" "$MNT/Users/Default/NTUSER.DAT"
+# Do not edit the SOFTWARE hive or the default user hive here: after a hivex merge into SOFTWARE,
+# Windows 11 setup could not write to it (errors 13 and 19 in the specialize pass). OneDrive is
+# disabled later by w64.cmd; the answer file already skips the network/account screens.
 
 # Boot partition contents: ARM64 boot manager, a BCD for this card, the agent script.
 ESP="$OUT/boot"
