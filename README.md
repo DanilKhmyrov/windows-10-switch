@@ -18,7 +18,7 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 |---|---|---|
 | Build | 15035 (Enterprise Insider Preview) | 19041/19045 (22H2 Pro) |
 | Boot to desktop | yes, autologon as user `Player` | yes, autologon as user `Player` |
-| CPU cores | 1 | 4 (via PSCI trapping in the shim, being tested) |
+| CPU cores | 1 | 4 at ~1786 MHz (via PSCI trapping in the shim) |
 | SD card | inbox `sdbus` | inbox `sdbus` through the shim's stage-2 trap |
 | Touch screen | yes, multi-touch (`drivers/swhid`) | not yet (driver is ARM32-only so far) |
 | Battery, charger, fan, overheat shutdown | yes (`drivers/swbatt`) | not yet |
@@ -171,7 +171,7 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 
 ## Roadmap
 
-- ARM64: clean up diagnostics, confirm 4-core stability, ARM64 builds of `swhid` and `swbatt`.
+- ARM64: ARM64 builds of `swhid` and `swbatt`, cheaper SD capability masking (drop the full SD page trap).
 - USB host (XUSB firmware load in UEFI + inbox XHCI), then networking.
 - Wi-Fi, Bluetooth and audio. [winx](https://github.com/steck0714/winx) has GPL-2.0 ARM64
   drivers for these, to be reviewed and ported.
