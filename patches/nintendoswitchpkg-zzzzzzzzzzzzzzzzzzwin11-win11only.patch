@@ -1,0 +1,13 @@
+--- a/Library/PlatformBootManagerLib/PlatformBm.c	2026-11-11 18:05:13.868327005 +0000
++++ b/Library/PlatformBootManagerLib/PlatformBm.c	2026-11-11 18:05:13.893327005 +0000
+@@ -422,7 +422,9 @@
+   VOID
+   )
+ {
+-  STATIC CONST CHAR16 Marker[]  = L"\\EFI\\Boot\\bootaa64.efi";
++  // Windows 11 build (*-win11only.patch): its boot manager is on the partition with this marker,
++  // so one card can carry Windows 10 and Windows 11, each with its own Hekate entry.
++  STATIC CONST CHAR16 Marker[]  = L"\\EFI\\Microsoft\\Boot\\win11.tag";
+   STATIC CONST CHAR16 BootMgr[] = L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi";
+   EFI_STATUS                       Status;
+   EFI_HANDLE                       *Handles;

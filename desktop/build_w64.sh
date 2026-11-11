@@ -16,7 +16,9 @@ IMAGE="$OUT/w64.img"
 rm -f "$IMAGE"
 truncate -s "${SIZE_MIB}M" "$IMAGE"
 mkntfs -F -Q -L Windows64 -p $((START_MIB * 2048)) -H 255 -S 63 "$IMAGE" > /dev/null
-wimapply "$ESD" "$INDEX" "$IMAGE" 2>&1 | tr '\r' '\n' | grep -vE '^(Extracting|Applying|Creating)' | tail -2
+# COMPACT=XPRESS4K applies the image WOF-compressed (CompactOS): Windows 11 Pro is about 22 GB
+# unpacked and roughly half of that compressed.
+wimapply "$ESD" "$INDEX" "$IMAGE" ${COMPACT:+--compact="$COMPACT"} 2>&1 | tr '\r' '\n' | grep -vE '^(Extracting|Applying|Creating)' | tail -2
 
 TMP="$(mktemp -d)"; MNT="$TMP/mnt"; mkdir "$MNT"
 ntfs-3g "$IMAGE" "$MNT"
@@ -28,18 +30,22 @@ cp "$HERE/setup64.cmd" "$MNT/swagent/setup.cmd"
 cp "$HERE/findagent64.cmd" "$MNT/swagent/findagent.cmd"
 cp "$HERE/copylogs.cmd" "$MNT/swagent/copylogs.cmd"
 
-# The Sysprep_Specialize_Bcd step cannot open the BCD store without UEFI variables.
+# Specialize steps that cannot work here (see below).
 python3 - "$MNT/Windows/System32/Sysprep/ActionFiles/Specialize.xml" <<'PY'
 import re, sys
 p = sys.argv[1]
 raw = open(p, "rb").read()
 enc = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8"
 t = raw.decode(enc)
-new, n = re.subn(r"<imaging[^>]*>(?:(?!</imaging>).)*Microsoft-Windows-Sysprep-SpBcd(?:(?!</imaging>).)*</imaging>\s*", "", t, flags=re.S)
-if n == 0:
-    raise SystemExit("SpBcd step not found")
-print(f"removed SpBcd steps: {n}")
-open(p, "wb").write(new.encode(enc))
+# Sysprep-SpBcd needs persistent UEFI variables. TerminalServices-ClientActiveXCore
+# (tssysprep.dll, RdpSysPrepRestoreOnline) fails on Windows 11 with error 19 and stops setup
+# with "Windows could not configure Windows to run on this computer's hardware".
+for component in ("Microsoft-Windows-Sysprep-SpBcd", "Microsoft-Windows-TerminalServices-ClientActiveXCore"):
+    t, n = re.subn(r"<imaging[^>]*>(?:(?!</imaging>).)*" + component + r"(?:(?!</imaging>).)*</imaging>\s*", "", t, flags=re.S)
+    if n == 0 and component.endswith("SpBcd"):
+        raise SystemExit("SpBcd step not found")
+    print(f"removed {component} steps: {n}")
+open(p, "wb").write(t.encode(enc))
 PY
 
 CONFIG="$MNT/Windows/System32/config"
@@ -74,6 +80,26 @@ REG
 hivexregedit --merge --prefix 'HKEY_LOCAL_MACHINE\SYSTEM' "$TMP/SYSTEM" "$TMP/system.reg"
 cp "$TMP/SYSTEM" "$CONFIG/SYSTEM"; cmp "$TMP/SYSTEM" "$CONFIG/SYSTEM"
 hivexget "$CONFIG/SYSTEM" '\Setup' CmdLine
+
+# Windows 11: never ask for a network connection or a Microsoft account during setup, and no
+# OneDrive (harmless on Windows 10).
+cp "$CONFIG/SOFTWARE" "$TMP/SOFTWARE"
+cat > "$TMP/software.reg" <<'REG'
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE]
+"BypassNRO"=dword:00000001
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\OneDrive]
+"DisableFileSyncNGSC"=dword:00000001
+REG
+hivexregedit --merge --prefix 'HKEY_LOCAL_MACHINE\SOFTWARE' "$TMP/SOFTWARE" "$TMP/software.reg"
+cp "$TMP/SOFTWARE" "$CONFIG/SOFTWARE"; cmp "$TMP/SOFTWARE" "$CONFIG/SOFTWARE"
+# OneDrive: also drop its first-logon installer from the default user profile.
+cp "$MNT/Users/Default/NTUSER.DAT" "$TMP/NTUSER.DAT"
+printf 'Windows Registry Editor Version 5.00\n\n[HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run]\n"OneDriveSetup"=-\n\n' > "$TMP/ntuser.reg"
+hivexregedit --merge --prefix 'HKEY_CURRENT_USER' "$TMP/NTUSER.DAT" "$TMP/ntuser.reg"
+cp "$TMP/NTUSER.DAT" "$MNT/Users/Default/NTUSER.DAT"; cmp "$TMP/NTUSER.DAT" "$MNT/Users/Default/NTUSER.DAT"
 
 # Boot partition contents: ARM64 boot manager, a BCD for this card, the agent script.
 ESP="$OUT/boot"

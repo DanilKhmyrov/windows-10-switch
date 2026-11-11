@@ -9,6 +9,7 @@ docker run --rm \
     -e ARCH \
     -e TARGET \
     -e CLEAN \
+    -e WIN11 \
     -v switch-wp-edk2:/work \
     -v "$PROJECT:/project" \
     switch-wp-uefi bash /project/uefi/container-build.sh
