@@ -12,15 +12,11 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 > Mariko unit (T210B01, HAC-001-01). Clock and voltage changes stay within the limits used by
 > Horizon. Use at your own risk.
 
-> **Experimental, for developers.** This is a research project, not an installer. The code and
-> notes explain how each part works, but some steps that got the test console to the desktop
-> were done by hand and are not scripted yet:
-> - creating the SD card partition layout;
-> - the ARM32 BCD is derived from a Windows 10 IoT Core BCD;
-> - on ARM64: `sdbus`/`sdstor` set to boot-start, a drive letter for CRASHDUMP, and the BCD
->   and setup-state fixes described under [Lessons learned](#lessons-learned).
->
-> No prebuilt loaders are published yet. Expect to read the scripts and adapt them.
+> **Experimental, for developers.** This is a research project, not a polished installer.
+> The ARM64 path below is scripted end to end, but so far it has only been run on the author's
+> card, which was set up step by step; the clean-card path was tested on a disk image, not on a
+> second console. Windows boots to the desktop, but without touch or USB there is no input yet.
+> The ARM32 path depends on a rare 15035 build and an IoT Core BCD and is documented for reference.
 
 ## Status
 
@@ -93,17 +89,22 @@ Microsoft images inside a Linux container (`ntfs-3g`, `hivex`, `wimlib`):
 
 - `build_w32.sh`: Windows 10 ARM32 from a 15035 archive. Adds the answer file, the `swagent`
   diagnostics service, the drivers, and a setup wrapper that keeps the setup logs.
-- `build_w64.sh`: Windows 10 ARM64 from an ESD, same tricks.
-- `make_bcd.sh`, `make_bcd64.sh`, `bcdlib.py`: BCD stores pointing at the MBR partitions.
+- `build_w64.sh`: Windows 10 ARM64 from an ESD, with every fix the test console needed (see
+  [Getting started](#getting-started-windows-10-arm64)). Also produces the boot partition contents
+  and a BCD generated from the image's own `BCD-Template` for your card.
+- `setup_card.py`: partitions a card for ARM64 and installs a build onto it (macOS).
+- `make_bcd.sh` (ARM32, from an IoT Core BCD), `make_bcd64.sh`, `bcdlib.py`: BCD stores pointing at
+  MBR partitions by disk signature and offset.
 - `skip_bcd_step.sh`: removes `Sysprep_Specialize_Bcd`, which needs persistent UEFI variables.
-- `setup_arm64_card.py`, `put_bl33.sh`, `put_bcd.sh`, `finalize_menu.py`, `make_icon.py`: install
-  onto the card and the Hekate menu.
+- `put_bl33.sh`, `put_bcd.sh`, `finalize_menu.py`, `make_icon.py`: update loaders, the BCD and the
+  Hekate menu on the test console's card.
 - `pull_win.py`, `push_win.py`, `img_sums.py`, `sync_from_card.py`, `replace_extent.py`,
   `hive_recover.py`, `setup_mode.sh`, `finish_setup.sh`: offline maintenance. They copy a partition,
   write back only the changed MiB, patch a registry hive in place, and recover hives left dirty
   by a power-off.
-- `w32.cmd`, `w64.cmd`: run by `swagent` on every boot from the CRASHDUMP partition. The Mac can
-  edit them without root, and they write logs that can be read back from the Mac.
+- `w32.cmd`, `w64.cmd`: run by `swagent` on every boot from the FAT boot partition
+  (`findagent64.cmd` finds it even when Windows gives it no drive letter). The Mac can edit them
+  without root, and they write logs that can be read back from the Mac.
 
 ### Drivers (`drivers/`)
 
@@ -115,7 +116,47 @@ KMDF/WDM drivers built in Docker with an extracted Enterprise WDK (not included)
 
 Both are ARM32 only for now; ARM64 builds are next.
 
+## Getting started: Windows 10 ARM64
+
+You need a Switch with Hekate (tested on Mariko only), a microSD card of 32 GB or more that may be
+**erased completely**, a Mac (the card scripts use `diskutil`), Docker, and about 30 GB of free disk
+space.
+
+1. **Back up your SD card.** Everything on it is erased, including emuMMC and Linux/Android.
+2. **Partition the card.** In Hekate open *Tools > USB Tools > SD Card*, connect the console, find
+   the card with `diskutil list` and its exact size with `diskutil info diskN`, then:
+   ```bash
+   sudo python3 -I desktop/setup_card.py partition diskN <size in bytes>
+   ```
+   Note the four numbers it prints at the end: disk signature, Windows partition start, boot
+   partition start, Windows partition size.
+3. **Put Hekate back** onto the `SWITCH` partition (the files from a Hekate release), then unzip
+   `windows-10-switch-arm64-*.zip` from the [Releases](../../releases) page onto it. Copy `bl31.bin`
+   from a Switchroot L4T Ubuntu release (`switchroot/ubuntu/bl31.bin`) into `wp64/`.
+4. **Get Windows 10 22H2 ARM64** as an ESD or WIM from Microsoft (for example through UUP dump), and
+   find the Pro edition index with `wimlib-imagex info file.esd`.
+5. **Build the image** with the numbers from step 2:
+   ```bash
+   docker build -t switch-wp-drivers drivers
+   docker run --rm --device /dev/fuse --cap-add SYS_ADMIN -v "$PWD:/project" \
+       -v /path/to/esd/folder:/esd -v /path/to/output:/out switch-wp-drivers \
+       /project/desktop/build_w64.sh /esd/file.esd <index> /out <signature> <win start> <boot start> <size>
+   ```
+6. **Write it to the card** (checks that the build matches this card):
+   ```bash
+   sudo python3 -I desktop/setup_card.py install diskN <size in bytes> /path/to/output
+   ```
+7. **Boot** *Windows 10 ARM64* from Hekate's Launch menu. The screen stays black for about 10 s,
+   then UEFI marks, the Windows logo and setup. The first boot takes 30-60 minutes and reboots
+   by itself; pick the entry again if Hekate comes back. It ends on the desktop with autologon as
+   `Player`. Logs are in `agent\` on the `WINBOOT` partition.
+
 ## SD card layout (MBR)
+
+`setup_card.py` creates: 1. FAT32 `SWITCH` (Hekate, `wp64/`), 2. FAT32 `WINBOOT` 512 MiB (boot
+manager, BCD, `agent\`), 3. NTFS Windows 10 ARM64.
+
+The test console's card carries both systems:
 
 | # | Start | Size | Contents |
 |---|---|---|---|

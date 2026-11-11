@@ -1,7 +1,8 @@
 @echo off
-rem ARM64: runs instead of oobe\windeploy.exe; copies setup logs to CRASHDUMP\agent\a64.
+rem ARM64: runs instead of oobe\windeploy.exe; copies setup logs to \agent\a64 on the boot partition.
 set L=C:\swagent
-for %%d in (D E F G H I J K) do if exist %%d:\agent\w64.cmd set L=%%d:\agent\a64
+call C:\swagent\findagent.cmd
+if defined AGENT set L=%AGENT%:\agent\a64
 mkdir %L% 2>nul
 echo ==== SETUP %date% %time% >> %L%\setup.txt
 reg query HKLM\SYSTEM\Setup >> %L%\setup.txt 2>&1

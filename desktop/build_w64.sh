@@ -1,14 +1,17 @@
 #!/bin/bash
 # Runs inside the switch-wp-drivers container (--device /dev/fuse --cap-add SYS_ADMIN).
-# Builds the Windows 10 ARM64 partition image (24 GiB, starting at 23104 MiB) from an ESD and
-# applies the same tricks that worked on ARM32: an answer file (user Player),
-# the swagent service with a log on CRASHDUMP (\agent\w64.cmd), skipping the BCD step, and a
-# setup wrapper that keeps logs (\agent\a64). ARM32 drivers are not added.
-# Boot manager files for CRASHDUMP go to <folder>/esp64.
-#   build_w64.sh image.esd index folder BCD_ARM64
+# Builds the Windows 10 ARM64 partition image from an ESD/WIM and everything for the small FAT
+# boot partition:
+#   <folder>/w64.img  NTFS image for the Windows partition (write it with setup_card.py);
+#   <folder>/boot/    files for the FAT boot partition: boot manager, BCD, \agent\w64.cmd.
+# Applied to the image: answer file (user Player, autologon), the swagent service that runs
+# \agent\w64.cmd from the boot partition on every boot, sdbus/sdstor as boot-start drivers,
+# skipping the Sysprep BCD step, and a setup wrapper that copies setup logs to \agent\a64.
+#   build_w64.sh image.esd index folder DISK_SIGNATURE WINDOWS_START_MiB BOOT_START_MiB [SIZE_MiB]
+# setup_card.py prints the disk signature and partition offsets of your card.
 set -euo pipefail
-ESD="$1"; INDEX="$2"; OUT="$3"; BCD="$4"; HERE="$(cd "$(dirname "$0")" && pwd)"
-START_MIB=23104; SIZE_MIB=24576
+ESD="$1"; INDEX="$2"; OUT="$3"; SIGNATURE="$4"; START_MIB="$5"; BOOT_MIB="$6"; SIZE_MIB="${7:-24576}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 IMAGE="$OUT/w64.img"
 rm -f "$IMAGE"
 truncate -s "${SIZE_MIB}M" "$IMAGE"
@@ -22,6 +25,7 @@ mkdir -p "$MNT/Windows/Panther" "$MNT/swagent"
 cp "$HERE/unattend64.xml" "$MNT/Windows/Panther/unattend.xml"
 cp "$HERE/boot64.cmd" "$MNT/swagent/boot.cmd"
 cp "$HERE/setup64.cmd" "$MNT/swagent/setup.cmd"
+cp "$HERE/findagent64.cmd" "$MNT/swagent/findagent.cmd"
 cp "$HERE/copylogs.cmd" "$MNT/swagent/copylogs.cmd"
 
 # The Sysprep_Specialize_Bcd step cannot open the BCD store without UEFI variables.
@@ -42,6 +46,8 @@ CONFIG="$MNT/Windows/System32/config"
 cp "$CONFIG/SYSTEM" "$TMP/SYSTEM"
 echo "Original SYSTEM\\Setup:"
 hivexget "$TMP/SYSTEM" '\Setup' | grep -E 'SetupType|SystemSetupInProgress|OOBEInProgress|SetupPhase|CmdLine' || true
+# sdbus/sdstor must start with the kernel, or the boot volume is missing
+# (INACCESSIBLE_BOOT_DEVICE).
 cat > "$TMP/system.reg" <<'REG'
 Windows Registry Editor Version 5.00
 
@@ -58,18 +64,28 @@ Windows Registry Editor Version 5.00
 
 [HKEY_LOCAL_MACHINE\SYSTEM\Setup]
 "CmdLine"="C:\\Windows\\System32\\cmd.exe /c C:\\swagent\\setup.cmd"
+
+[HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\sdbus]
+"Start"=dword:00000000
+
+[HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\sdstor]
+"Start"=dword:00000000
 REG
 hivexregedit --merge --prefix 'HKEY_LOCAL_MACHINE\SYSTEM' "$TMP/SYSTEM" "$TMP/system.reg"
 cp "$TMP/SYSTEM" "$CONFIG/SYSTEM"; cmp "$TMP/SYSTEM" "$CONFIG/SYSTEM"
 hivexget "$CONFIG/SYSTEM" '\Setup' CmdLine
 
-# ARM64 boot manager for the CRASHDUMP partition.
-ESP="$OUT/esp64"
+# Boot partition contents: ARM64 boot manager, a BCD for this card, the agent script.
+ESP="$OUT/boot"
 rm -rf "$ESP"; mkdir -p "$ESP/EFI/Boot" "$ESP/EFI/Microsoft/Boot"
 cp -r "$MNT/Windows/Boot/EFI/." "$ESP/EFI/Microsoft/Boot/"
 cp -r "$MNT/Windows/Boot/Fonts" "$ESP/EFI/Microsoft/Boot/Fonts"
 cp "$MNT/Windows/Boot/EFI/bootmgfw.efi" "$ESP/EFI/Boot/bootaa64.efi"
-cp "$BCD" "$ESP/EFI/Microsoft/Boot/BCD"
+"$HERE/make_bcd64.sh" "$MNT/Windows/System32/config/BCD-Template" "$ESP/EFI/Microsoft/Boot/BCD" \
+    "$SIGNATURE" "$START_MIB" "$BOOT_MIB"
+mkdir -p "$ESP/agent"
+cp "$HERE/w64.cmd" "$ESP/agent/w64.cmd"
 du -sh "$ESP"
+echo "$SIGNATURE $START_MIB $BOOT_MIB $SIZE_MIB" > "$OUT/card.txt"
 sync
 echo "DONE: $IMAGE"
