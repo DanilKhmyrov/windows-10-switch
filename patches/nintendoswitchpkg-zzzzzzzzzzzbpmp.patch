@@ -1,0 +1,160 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+index 9337d48..a680664 100644
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -420,6 +420,145 @@ CpuBoost1428(VOID)
+     return Status;
+ }
+ 
++// RAM 1600 MHz on Mariko: ask the BPMP firmware (loaded and trained by hekate's L4T
++// launcher) to switch EMC, the same way the switchroot kernel does (MRQ_CLK on BPMP clock 0
++// "emc"). The firmware uses its own trained tables and does periodic training itself.
++// Transport (T210): 128-byte frame per channel in IRAM, 2-bit state per channel in the
++// RES_SEMA arbitration semaphore, doorbell = legacy ICTLR FIR bit 6. Polling only.
++// Marks (row above the progress squares): green = step passed, magenta = failed.
++#define BP_SEMA       0x60001000      // STA +0, SET +4, CLR +8
++#define BP_FIR_SET    0x60004018
++#define BP_ATOM       0x70016000
++#define BP_CH         4               // thread channel
++#define BP_MA_FREE    2
++#define BP_MA_ACKD    3
++#define BP_MRQ_PING   0
++#define BP_MRQ_CLK    22
++#define BP_MRQ_EMC_TABLE 32
++
++STATIC volatile UINT32 *mBpMb;
++
++STATIC
++VOID
++BpMark(UINTN Step, BOOLEAN Ok)
++{
++    volatile UINT32 *Fb = (volatile UINT32 *) (UINTN) 0xF5A00000;
++    UINTN X, Y;
++    UINTN Left = 10 + (Step - 1) * 70;
++
++    for (Y = 1032; Y < 1052; Y++) {
++        for (X = Left; X < Left + 50; X++) {
++            Fb[Y * 720 + X] = Ok ? 0xFF30C060 : 0xFFFF00FF;
++        }
++    }
++}
++
++STATIC
++BOOLEAN
++BpWaitState(UINT32 State)
++{
++    UINTN Ms;
++
++    for (Ms = 0; Ms < 4000; Ms++) {
++        if (((MmioRead32(BP_SEMA) >> (2 * BP_CH)) & 3) == State) return TRUE;
++        RamUs(1000);
++    }
++    return FALSE;
++}
++
++STATIC
++INT32
++BpXfer(UINT32 Mrq, CONST UINT32 *In, UINTN InWords, UINT32 *Out, UINTN OutWords)
++{
++    UINTN I;
++    INT32 Code;
++
++    if (!BpWaitState(BP_MA_FREE)) return -1000;
++    mBpMb[0] = Mrq;
++    mBpMb[1] = 1;                                           // DO_ACK, no doorbell back
++    for (I = 0; I < InWords; I++) mBpMb[2 + I] = In[I];
++    MemoryFence();
++    MmioWrite32(BP_SEMA + 8, 3u << (2 * BP_CH));            // -> SL_SIGL
++    MmioWrite32(BP_FIR_SET, 1u << 6);                       // ring BPMP
++    if (!BpWaitState(BP_MA_ACKD)) return -1001;
++    for (I = 0; I < OutWords; I++) Out[I] = mBpMb[2 + I];
++    Code = (INT32) mBpMb[0];
++    MmioWrite32(BP_SEMA + 8, 1u << (2 * BP_CH));            // MA_ACKD -> MA_FREE
++    return Code;
++}
++
++STATIC
++EFI_STATUS
++BpmpEmcRaise(UINT32 TargetKhz)
++{
++    UINT32 Req[4], Rsp[30];
++    UINT32 Area, I, Best = 0;
++    UINT64 Rate;
++    CONST UINT8 *Name;
++
++    if (((MmioRead32(0x70000804) >> 4) & 0xF) != 2) return EFI_UNSUPPORTED;
++
++    // 1: ATOMICS clocked and out of reset (the BPMP firmware set it up).
++    if (!(MmioRead32(0x60006360) & BIT16) || (MmioRead32(0x60006358) & BIT16)) {
++        BpMark(1, FALSE); return EFI_NOT_READY;
++    }
++    BpMark(1, TRUE);
++
++    // 2: sign of life from the firmware (all channels MA_FREE).
++    for (I = 0; I < 3000 && MmioRead32(BP_SEMA) != 0xAAAAAAAA; I++) RamUs(1000);
++    if (MmioRead32(BP_SEMA) == 0) { BpMark(2, FALSE); return EFI_NOT_READY; }
++    BpMark(2, TRUE);
++
++    // 3: channel frame address, must be in IRAM.
++    MmioWrite32(BP_ATOM, (BP_CH << 16) | 4);
++    Area = MmioRead32(BP_ATOM + 0xC00 + BP_CH * 4);
++    if (Area < 0x40000000 || Area >= 0x40040000 || (Area & 3)) { BpMark(3, FALSE); return EFI_NOT_FOUND; }
++    mBpMb = (volatile UINT32 *) (UINTN) Area;
++    BpMark(3, TRUE);
++
++    // 4: ping.
++    Req[0] = 1;
++    if (BpXfer(BP_MRQ_PING, Req, 1, Rsp, 1) != 0 || Rsp[0] != 2) { BpMark(4, FALSE); return EFI_DEVICE_ERROR; }
++    BpMark(4, TRUE);
++
++    // 5: available EMC rates; take the highest one not above the target.
++    if (BpXfer(BP_MRQ_EMC_TABLE, NULL, 0, Rsp, 29) != 0 || Rsp[0] == 0 || Rsp[0] > 14) {
++        BpMark(5, FALSE); return EFI_DEVICE_ERROR;
++    }
++    for (I = 0; I < Rsp[0]; I++) {
++        if (Rsp[1 + 2 * I] <= TargetKhz && Rsp[1 + 2 * I] > Best) Best = Rsp[1 + 2 * I];
++    }
++    if (Best <= 204000) { BpMark(5, FALSE); return EFI_NOT_FOUND; }
++    BpMark(5, TRUE);
++
++    // 6: clock 0 must be "emc".
++    Req[0] = (14u << 24) | 0;
++    if (BpXfer(BP_MRQ_CLK, Req, 1, Rsp, 29) != 0) { BpMark(6, FALSE); return EFI_DEVICE_ERROR; }
++    Name = (CONST UINT8 *) Rsp + 73;
++    if (Name[0] != 'e' || Name[1] != 'm' || Name[2] != 'c' || Name[3] != 0) { BpMark(6, FALSE); return EFI_NOT_FOUND; }
++    BpMark(6, TRUE);
++
++    // 7: round the rate.
++    Rate = (UINT64) Best * 1000;
++    Req[0] = (3u << 24) | 0; Req[1] = 0; Req[2] = (UINT32) Rate; Req[3] = (UINT32) (Rate >> 32);
++    if (BpXfer(BP_MRQ_CLK, Req, 4, Rsp, 2) != 0 || (INT32) Rsp[1] < 0 || (Rsp[0] == 0 && Rsp[1] == 0)) {
++        BpMark(7, FALSE); return EFI_DEVICE_ERROR;
++    }
++    BpMark(7, TRUE);
++
++    // 8: set the rate (the firmware performs the switch).
++    Req[0] = (2u << 24) | 0; Req[1] = 0; Req[2] = Rsp[0]; Req[3] = Rsp[1];
++    if (BpXfer(BP_MRQ_CLK, Req, 4, Rsp, 2) != 0 || (INT32) Rsp[1] < 0) { BpMark(8, FALSE); return EFI_DEVICE_ERROR; }
++    BpMark(8, TRUE);
++
++    // 9: read back.
++    Req[0] = (1u << 24) | 0;
++    if (BpXfer(BP_MRQ_CLK, Req, 1, Rsp, 2) != 0) { BpMark(9, FALSE); return EFI_DEVICE_ERROR; }
++    Rate = ((UINT64) Rsp[1] << 32) | Rsp[0];
++    BpMark(9, Rate > 1000000000ULL);
++    return Rate > 1000000000ULL ? EFI_SUCCESS : EFI_DEVICE_ERROR;
++}
++
+ // Windows has no fan driver, so run the fan at a fixed speed. This repeats
+ // what hekate does in fan_set_duty() and regulator_5v_enable().
+ #define FAN_DUTY_MAX    236
+@@ -1253,7 +1392,8 @@ SdMmcDxeInitialize
+ 	(VOID) TouchPowerOn();
+ 	StepMark(2, TRUE);
+ 	// A failed RAM switch leaves the old clock; boot continues either way.
+-	StepMark(3, !EFI_ERROR(RamBoost408()));
++	// RAM: BPMP firmware switches EMC to 1600 MHz (RamBoost408 must not be used with it).
++	StepMark(3, !EFI_ERROR(BpmpEmcRaise(1600000)));
+ 	// A failed CPU switch leaves the old clock and voltage; boot continues either way.
+ 	StepMark(9, !EFI_ERROR(CpuBoost1428()));
+ 

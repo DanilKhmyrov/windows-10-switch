@@ -1,0 +1,75 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+index 25212dc..9337d48 100644
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -137,6 +137,22 @@ TouchPowerOn(VOID)
+     return EFI_SUCCESS;
+ }
+ 
++// Step marks (third row, small): blue = reached, magenta = failed. Diagnostics only.
++STATIC
++VOID
++StepMark(UINTN Step, BOOLEAN Ok)
++{
++    volatile UINT32 *Fb = (volatile UINT32 *) (UINTN) 0xF5A00000;
++    UINTN X, Y;
++    UINTN Left = 10 + (Step - 1) * 70;
++
++    for (Y = 1255; Y < 1275; Y++) {
++        for (X = Left; X < Left + 50; X++) {
++            Fb[Y * 720 + X] = Ok ? 0xFF3060FF : 0xFFFF00FF;
++        }
++    }
++}
++
+ // RAM: hekate leaves EMC at 204 MHz on Mariko (T210B01), and Windows has no EMC
+ // driver. Switch to 408 MHz exactly like hekate does in its own menu
+ // (_minerva_set_ir_boost in hekate_libsys_minerva): PLLP source, no training,
+@@ -369,6 +385,7 @@ CpuBoost1428(VOID)
+     if (At33) OldVout = Probe;
+     if (At31 == At33) return EFI_NOT_FOUND;
+     Addr = At31 ? 0x31 : 0x33;
++    StepMark(4, TRUE);
+     if (OldVout < CPU_VOUT_MIN_OK || OldVout > CPU_VOUT_MAX_OK) return EFI_UNSUPPORTED;
+ 
+     if (OldVout < CPU_VOUT_NEW) {
+@@ -378,18 +395,22 @@ CpuBoost1428(VOID)
+         }
+         RamUs(1000);    // 5 mV/us ramp: 320 mV take 64 us
+     }
++    StepMark(5, TRUE);
+ 
+     Ints = SaveAndDisableInterrupts();
+     MmioWrite32(CPU_CCLK_BURST, CPU_BURST_PLLP);
+     RamUs(5);
++    StepMark(6, TRUE);
+     if (!CpuPllxProgram(CPU_PLLX_NEW)) {
+         // Back to the old setting; the CPU keeps running on PLLP until it locks.
+         (VOID) CpuPllxProgram(OldPllx & 0x01FFFFFF);
+         Status = EFI_DEVICE_ERROR;
+     }
++    StepMark(7, !EFI_ERROR(Status));
+     if (MmioRead32(CPU_PLLX_BASE) & CPU_PLL_LOCK) {
+         MmioWrite32(CPU_CCLK_BURST, CPU_BURST_PLLX);
+         RamUs(5);
++        StepMark(8, TRUE);
+     }
+     SetInterruptState(Ints);
+ 
+@@ -1227,12 +1248,14 @@ SdMmcDxeInitialize
+ 	// The slot stays at 3.3 V: hide the 1.8 V UHS modes (SDR104, SDR50) from Windows.
+ 	MmioAnd32(0x700B0120, ~(UINT32) 0x18);
+ 	FanStart();
++	StepMark(1, TRUE);
+ 	// A touch failure must not stop the boot from the SD card.
+ 	(VOID) TouchPowerOn();
++	StepMark(2, TRUE);
+ 	// A failed RAM switch leaves the old clock; boot continues either way.
+-	(VOID) RamBoost408();
++	StepMark(3, !EFI_ERROR(RamBoost408()));
+ 	// A failed CPU switch leaves the old clock and voltage; boot continues either way.
+-	(VOID) CpuBoost1428();
++	StepMark(9, !EFI_ERROR(CpuBoost1428()));
+ 
+ 	Status = TegraMmcInit();
+ 	if (EFI_ERROR(Status)) goto exit;

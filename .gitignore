@@ -1,0 +1,29 @@
+# Сборки: выкладываются отдельно (релизы), не в репозиторий
+uefi/out/
+drivers/out/
+shim/*.bin
+*.fd
+
+# Файлы Microsoft и WDK: не распространять
+windows/out/
+*.efi
+*.sys
+*.cat
+*.wim
+*.esd
+*.ffu
+*.img
+BCD
+BCD.*
+
+# Закрытый ключ тестовой подписи драйверов
+drivers/test-cert/*.key
+*.pfx
+*.pvk
+
+# Рабочий мусор
+__pycache__/
+*.pyc
+*.bak*
+*.smp
+.DS_Store

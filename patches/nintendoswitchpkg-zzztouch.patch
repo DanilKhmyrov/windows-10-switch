@@ -1,0 +1,94 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+index 5e5a6a6..a58da8a 100644
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -27,6 +27,7 @@
+ #include <Device/Pmc.h>
+ #include <Library/GpioLib.h>
+ #include <Library/IoLib.h>
++#include <Library/Max7762xLib.h>
+ #include <Library/TimerLib.h>
+ #include <Protocol/Pmic.h>
+ #include <Shim/DebugLib.h>
+@@ -70,6 +71,72 @@ PMIC_PROTOCOL* mPmicProtocol;
+ #define SD_SCHMT                    (1 << 12)
+ #define SD_DRIVE_2X                 (1 << 13)
+ 
++// Touch panel: repeats hekate's touch_power_on() up to the reset release.
++// LDO6 is the only PMIC output changed here.
++#define TOUCH_LDO6_UV       2900000
++#define TOUCH_PIN_RESET     0x70003150
++#define TOUCH_GPIO_J_CNF    0x6000D204
++#define TOUCH_GPIO_J_OE     0x6000D214
++#define TOUCH_GPIO_J_OUT    0x6000D224
++#define TOUCH_PIN_I2C3_SCL  0x700030CC
++#define TOUCH_PIN_I2C3_SDA  0x700030D0
++#define TOUCH_PIN_I2C4_SCL  0x700030D4
++#define TOUCH_PIN_I2C4_SDA  0x700030D8
++#define TOUCH_PIN_INPUT     BIT6
++#define TOUCH_CLK_SRC_I2C3  0x600061B8
++#define TOUCH_RST_U_SET     0x60006310
++#define TOUCH_RST_U_CLR     0x60006314
++#define TOUCH_ENB_U_SET     0x60006330
++#define TOUCH_ENB_U_CLR     0x60006334
++#define TOUCH_CLK_I2C3      BIT3
++#define TOUCH_I2C3_BASE     0x7000C500
++#define TOUCH_I2C_CLK_DIV   (TOUCH_I2C3_BASE + 0x6C)
++#define TOUCH_I2C_BC_CONFIG (TOUCH_I2C3_BASE + 0x84)
++#define TOUCH_I2C_CFG_LOAD  (TOUCH_I2C3_BASE + 0x8C)
++
++STATIC
++EFI_STATUS
++TouchPowerOn(VOID)
++{
++    EFI_STATUS Status;
++    UINTN Retry;
++
++    MmioWrite32(TOUCH_PIN_RESET, BIT2 | 1);
++    MmioOr32(TOUCH_GPIO_J_CNF, BIT7);
++    MmioAnd32(TOUCH_GPIO_J_OUT, ~(UINT32) BIT7);
++    MmioOr32(TOUCH_GPIO_J_OE, BIT7);
++    MicroSecondDelay(20);
++
++    Status = mPmicProtocol->SetRegulatorVoltage(REGULATOR_LDO6, TOUCH_LDO6_UV);
++    if (EFI_ERROR(Status)) return Status;
++    mPmicProtocol->EnableRegulator(REGULATOR_LDO6);
++
++    MmioWrite32(TOUCH_PIN_I2C3_SCL, TOUCH_PIN_INPUT);
++    MmioWrite32(TOUCH_PIN_I2C3_SDA, TOUCH_PIN_INPUT);
++    MmioOr32(TOUCH_PIN_I2C4_SCL, 1);
++    MmioOr32(TOUCH_PIN_I2C4_SDA, 1);
++
++    MmioWrite32(TOUCH_RST_U_SET, TOUCH_CLK_I2C3);
++    MmioWrite32(TOUCH_ENB_U_CLR, TOUCH_CLK_I2C3);
++    MmioWrite32(TOUCH_CLK_SRC_I2C3, 6 << 29);
++    MmioWrite32(TOUCH_ENB_U_SET, TOUCH_CLK_I2C3);
++    MicroSecondDelay(2);
++    MmioWrite32(TOUCH_RST_U_CLR, TOUCH_CLK_I2C3);
++    (VOID) MmioRead32(TOUCH_RST_U_SET);
++
++    MmioWrite32(TOUCH_I2C_CLK_DIV, (5 << 16) | 1);
++    MmioWrite32(TOUCH_I2C_BC_CONFIG, (9 << 16) | BIT1 | BIT0);
++    MmioWrite32(TOUCH_I2C_CFG_LOAD, BIT5 | BIT2 | BIT0);
++    for (Retry = 0; Retry < 20 && (MmioRead32(TOUCH_I2C_CFG_LOAD) & BIT0); Retry++) {
++        MicroSecondDelay(1);
++    }
++    MicroSecondDelay(1000);
++
++    MmioOr32(TOUCH_GPIO_J_OUT, BIT7);
++    MicroSecondDelay(10000);
++    return EFI_SUCCESS;
++}
++
+ // Windows has no fan driver, so run the fan at a fixed speed. This repeats
+ // what hekate does in fan_set_duty() and regulator_5v_enable().
+ #define FAN_DUTY_MAX    236
+@@ -894,6 +961,8 @@ SdMmcDxeInitialize
+ 	// The slot stays at 3.3 V: hide the 1.8 V UHS modes (SDR104, SDR50) from Windows.
+ 	MmioAnd32(0x700B0120, ~(UINT32) 0x18);
+ 	FanStart();
++	// A touch failure must not stop the boot from the SD card.
++	(VOID) TouchPowerOn();
+ 
+ 	Status = TegraMmcInit();
+ 	if (EFI_ERROR(Status)) goto exit;

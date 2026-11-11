@@ -1,0 +1,101 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+index a58da8a..537cdd0 100644
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -276,7 +276,11 @@ VOID
+ SdDiag(UINTN Stage, BOOLEAN Passed)
+ {
+     volatile UINT32 *Fb = (volatile UINT32 *) (UINTN) SD_DIAG_FB;
++#ifdef CLEAN_BOOT
++    UINT32 Color = Passed ? 0xFF000000 : 0xFFFF00FF;   // Clean boot: only failures show.
++#else
+     UINT32 Color = Passed ? 0xFF00FF00 : 0xFFFF00FF;
++#endif
+     UINTN X, Y;
+     UINTN Left = 20 + (Stage - 1) * 100;
+ 
+diff --git a/Include/Device/EarlyMark.h b/Include/Device/EarlyMark.h
+index 1ed4724..442d230 100644
+--- a/Include/Device/EarlyMark.h
++++ b/Include/Device/EarlyMark.h
+@@ -1,6 +1,13 @@
+ #ifndef _DEVICE_EARLY_MARK_H_
+ #define _DEVICE_EARLY_MARK_H_
+ 
++// CLEAN_BOOT: the same drawing (same timing), but in black, so nothing shows.
++#ifdef CLEAN_BOOT
++#define EARLY_MARK_COLOR 0xFF000000
++#else
++#define EARLY_MARK_COLOR 0xFF00FF00
++#endif
++
+ //
+ // Progress squares for bring-up without a serial cable. Row above the SD card
+ // squares. Green square N means startup got as far as step N.
+@@ -15,7 +22,7 @@ EarlyMark(UINTN Stage)
+ 
+   for (Y = 1060; Y < 1130; Y++) {
+     for (X = Left; X < Left + 70; X++) {
+-      Fb[Y * 720 + X] = 0xFF00FF00;
++      Fb[Y * 720 + X] = EARLY_MARK_COLOR;
+     }
+   }
+ }
+diff --git a/Library/NintendoSwitchPlatformLib/Arm/ArmPlatformHelper.S b/Library/NintendoSwitchPlatformLib/Arm/ArmPlatformHelper.S
+index 3f8f62f..ffe2268 100644
+--- a/Library/NintendoSwitchPlatformLib/Arm/ArmPlatformHelper.S
++++ b/Library/NintendoSwitchPlatformLib/Arm/ArmPlatformHelper.S
+@@ -8,7 +8,11 @@
+ // First code of the firmware: paint progress square 1 (see Device/EarlyMark.h).
+ ASM_FUNC(ArmPlatformPeiBootAction)
+   MOV32 (r0, 0xF5CE9550)
++#ifdef CLEAN_BOOT
++  MOV32 (r3, 0xFF000000)
++#else
+   MOV32 (r3, 0xFF00FF00)
++#endif
+   mov   r1, #70
+ 1:
+   mov   r2, #0
+diff --git a/Library/Tegra8250SerialPortLib/Tegra8250SerialPortLib.c b/Library/Tegra8250SerialPortLib/Tegra8250SerialPortLib.c
+index f28e24a..3feff24 100644
+--- a/Library/Tegra8250SerialPortLib/Tegra8250SerialPortLib.c
++++ b/Library/Tegra8250SerialPortLib/Tegra8250SerialPortLib.c
+@@ -90,6 +90,12 @@ SerialPortInitialize
+ #define FB_LOG_STRIDE    720
+ #define FB_LOG_COLS      90
+ #define FB_LOG_ROWS      54
++// CLEAN_BOOT: the log is still drawn glyph by glyph (same timing), nearly black.
++#ifdef CLEAN_BOOT
++#define FB_LOG_INK       0xFF010101   // almost black: keeps the exact DEBUG timing
++#else
++#define FB_LOG_INK       0xFFFFFFFF
++#endif
+ 
+ STATIC
+ VOID
+@@ -134,7 +140,7 @@ FbLogPutc(UINT8 Ch)
+ 		for (Y = 0; Y < 19; Y++) {
+ 			for (X = 0; X < 8; X++) {
+ 				Fb[(Row * 19 + Y) * FB_LOG_STRIDE + Col * 8 + X] =
+-					(Glyph[Y] & (0x80 >> X)) ? 0xFFFFFFFF : 0xFF000000;
++					(Glyph[Y] & (0x80 >> X)) ? FB_LOG_INK : 0xFF000000;
+ 			}
+ 		}
+ 		Col++;
+diff --git a/NintendoSwitch.dsc b/NintendoSwitch.dsc
+index d7a522d..6215c6d 100644
+--- a/NintendoSwitch.dsc
++++ b/NintendoSwitch.dsc
+@@ -36,6 +36,11 @@
+ [BuildOptions.common]
+   GCC:*_*_AARCH64_CC_FLAGS = -Wno-unused-variable
+   GCC:*_*_ARM_CC_FLAGS = -Wno-unused-variable -Wno-unused-function -Wno-missing-braces
++  # build -D CLEAN_BOOT: the screen output is drawn in black (same timing as DEBUG).
++!ifdef CLEAN_BOOT
++  GCC:*_*_*_CC_FLAGS = -DCLEAN_BOOT
++  GCC:*_*_*_PP_FLAGS = -DCLEAN_BOOT
++!endif
+ 
+ ################################################################################
+ #

@@ -1,0 +1,132 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+index 537cdd0..a7839e9 100644
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -137,6 +137,118 @@ TouchPowerOn(VOID)
+     return EFI_SUCCESS;
+ }
+ 
++// RAM: hekate leaves EMC at 204 MHz on Mariko (T210B01), and Windows has no EMC
++// driver. Switch to 408 MHz exactly like hekate does in its own menu
++// (_minerva_set_ir_boost in hekate_libsys_minerva): PLLP source, no training,
++// no voltage change. Only runs on Mariko from hekate's 204 MHz PLLP state.
++#define RAM_EMC_BASE        0x7001B000
++#define RAM_MC_BASE         0x70019000
++#define RAM_TMR_US          0x60005010
++#define RAM_CLK_SOURCE_EMC  0x6000619C
++#define RAM_CLK_204         0x40188002
++#define RAM_CLK_408         0x40188000
++#define RAM_EMC(Off)        (RAM_EMC_BASE + (Off))
++#define RAM_MC(Off)         (RAM_MC_BASE + (Off))
++
++STATIC
++VOID
++RamUs(UINT32 Us)
++{
++    UINT32 Start = MmioRead32(RAM_TMR_US);
++    while ((UINT32) (MmioRead32(RAM_TMR_US) - Start) <= Us) {
++    }
++}
++
++STATIC
++EFI_STATUS
++RamBoost408(VOID)
++{
++    UINT32 DbgO, DbgC, CfgO, AutoCalO, DpdO, PipeO, FdpdO;
++    BOOLEAN Ints;
++    UINTN Retry;
++    EFI_STATUS Status = EFI_TIMEOUT;
++
++    if (((MmioRead32(0x70000804) >> 4) & 0xF) != 2) return EFI_UNSUPPORTED;
++    if (MmioRead32(RAM_CLK_SOURCE_EMC) != RAM_CLK_204) return EFI_UNSUPPORTED;
++
++    Ints = SaveAndDisableInterrupts();
++
++    MmioWrite32(RAM_EMC(0x0), BIT4);                      // EMC_INTSTATUS: clear CLKCHANGE
++    DbgO = MmioRead32(RAM_EMC(0x8));
++    DbgC = DbgO & ~(UINT32) (BIT1 | BIT0);
++    MmioWrite32(RAM_EMC(0x8), DbgC);
++    (VOID) MmioRead32(RAM_EMC(0x8));
++
++    CfgO     = MmioRead32(RAM_EMC(0xC));
++    AutoCalO = MmioRead32(RAM_EMC(0x2A4));
++    DpdO     = MmioRead32(RAM_EMC(0x3D8));
++    PipeO    = MmioRead32(RAM_EMC(0x558));
++    FdpdO    = MmioRead32(RAM_EMC(0x4D8));
++
++    MmioWrite32(RAM_EMC(0x8), DbgC | BIT1);
++    (VOID) MmioRead32(RAM_EMC(0x8));
++    MmioWrite32(RAM_EMC(0x2A4), (AutoCalO & 0x7FFFF9FE) | 0x601);
++    (VOID) MmioRead32(RAM_EMC(0x2A4));
++    MmioWrite32(RAM_EMC(0xC), CfgO & 0xFFFFFFF);
++    MmioWrite32(RAM_EMC(0x3D8), DpdO & 0xFFFFFEC3);
++    MmioWrite32(RAM_EMC(0x558), PipeO | BIT0);
++    MmioWrite32(RAM_EMC(0x4D8), FdpdO & ~(UINT32) BIT0);
++    MmioWrite32(RAM_EMC(0x8), DbgC);
++    (VOID) MmioRead32(RAM_EMC(0x8));
++    RamUs(5);
++
++    // Arbiter and base timings for 408 MHz (values from hekate).
++    MmioWrite32(RAM_MC(0x90), 0x1000003);
++    MmioWrite32(RAM_MC(0x9C), 1);
++    MmioWrite32(RAM_MC(0xA0), 6);
++    MmioWrite32(RAM_MC(0xA4), 3);
++    MmioWrite32(RAM_MC(0xA8), 4);
++    MmioWrite32(RAM_MC(0x6C0), 0xE);
++    MmioWrite32(RAM_MC(0xD4), 0x30203);
++    MmioWrite32(RAM_MC(0xD8), 0x71E30507);
++    MmioWrite32(RAM_EMC(0x38), 8);
++    MmioWrite32(RAM_EMC(0x9C), 9);
++    MmioWrite32(RAM_EMC(0x2C), 25);
++    MmioWrite32(RAM_EMC(0x34), 18);
++    MmioWrite32(RAM_EMC(0x3C), 15);
++    MmioWrite32(RAM_EMC(0x4C), 8);
++    MmioWrite32(RAM_EMC(0x50), 8);
++    MmioWrite32(RAM_EMC(0x98), 17);
++    MmioWrite32(RAM_EMC(0x2E4), 0xE0198);
++    MmioWrite32(RAM_EMC(0x30), 115);
++    MmioWrite32(RAM_EMC(0x590), 58);
++    MmioWrite32(RAM_EMC(0xA8), 0x18DD);
++    MmioWrite32(RAM_EMC(0x70), 0x181E);
++    MmioWrite32(RAM_EMC(0x3DC), 0x607);
++    MmioWrite32(RAM_EMC(0x3E0), (MmioRead32(RAM_EMC(0x3E0)) & 0xFFFF0000) | 0xD22);
++
++    MmioWrite32(RAM_EMC(0xC), CfgO & 0xEFFFFFFF);
++    MmioWrite32(RAM_EMC(0x558), PipeO);
++    MmioWrite32(RAM_EMC(0x8), DbgO);
++    (VOID) MmioRead32(RAM_EMC(0x8));
++
++    // Clock change and handshake.
++    MmioWrite32(RAM_CLK_SOURCE_EMC, RAM_CLK_408);
++    (VOID) MmioRead32(RAM_CLK_SOURCE_EMC);
++    for (Retry = 0; Retry < 2000; Retry++) {
++        if (MmioRead32(RAM_EMC(0x0)) & BIT4) {
++            Status = EFI_SUCCESS;
++            break;
++        }
++        RamUs(1);
++    }
++
++    MmioWrite32(RAM_EMC(0xC), CfgO);
++    MmioWrite32(RAM_EMC(0x4D8), FdpdO);
++    MmioWrite32(RAM_EMC(0x3D8), DpdO);
++    MmioWrite32(RAM_EMC(0x2A4), AutoCalO);
++    MmioWrite32(RAM_EMC(0x28), 1);                        // EMC_TIMING_CONTROL
++    RamUs(20);
++
++    SetInterruptState(Ints);
++    return Status;
++}
++
+ // Windows has no fan driver, so run the fan at a fixed speed. This repeats
+ // what hekate does in fan_set_duty() and regulator_5v_enable().
+ #define FAN_DUTY_MAX    236
+@@ -967,6 +1079,8 @@ SdMmcDxeInitialize
+ 	FanStart();
+ 	// A touch failure must not stop the boot from the SD card.
+ 	(VOID) TouchPowerOn();
++	// A failed RAM switch leaves the old clock; boot continues either way.
++	(VOID) RamBoost408();
+ 
+ 	Status = TegraMmcInit();
+ 	if (EFI_ERROR(Status)) goto exit;

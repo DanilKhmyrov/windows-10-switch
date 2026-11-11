@@ -1,0 +1,208 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+index 25e587e..fe625c2 100644
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -26,6 +26,8 @@
+ #include <Device/T210.h>
+ #include <Device/Pmc.h>
+ #include <Library/GpioLib.h>
++#include <Library/IoLib.h>
++#include <Library/TimerLib.h>
+ #include <Protocol/Pmic.h>
+ #include <Shim/DebugLib.h>
+ #include <Shim/UBootIo.h>
+@@ -39,6 +41,114 @@
+ 
+ TEGRA210_UBOOT_CLOCK_MANAGEMENT_PROTOCOL* mClkProtocol;
+ PMIC_PROTOCOL* mPmicProtocol;
++
++//
++// Hekate cuts SD power before it starts us, and this driver used to rely on
++// Coreboot having it on. Same bring-up as hekate's _sdmmc_config_sdmmc1().
++//
++#define SD_APB_MISC_BASE            0x70000000
++#define SD_PINMUX_AUX_BASE          0x70003000
++#define SD_PMC_BASE                 0x7000E400
++#define SD_MISC_HIDREV              0x804
++#define SD_MISC_CLK_LPBK            0x8D4
++#define SD_MISC_PAD_CFG             0xA98
++#define SD_MISC_VGPIO_MUX_SEL       0xB74
++#define SD_PMC_NO_IOPOWER           0x44
++#define SD_PMC_PWR_DET_VAL          0xE4
++#define SD_PMC_SDMMC1_BIT           (1 << 12)
++#define SD_PIN_CLK                  0x00
++#define SD_PIN_CMD                  0x04
++#define SD_PIN_DAT3                 0x08
++#define SD_PIN_DAT2                 0x0C
++#define SD_PIN_DAT1                 0x10
++#define SD_PIN_DAT0                 0x14
++#define SD_PIN_DMIC3_CLK            0xB4
++#define SD_PIN_PZ1                  0x280
++#define SD_PULL_DOWN                (1 << 2)
++#define SD_PULL_UP                  (2 << 2)
++#define SD_INPUT_ENABLE             (1 << 6)
++#define SD_SCHMT                    (1 << 12)
++#define SD_DRIVE_2X                 (1 << 13)
++
++STATIC
++VOID
++SdPowerUp(VOID)
++{
++    UINT32 Pad = SD_DRIVE_2X | SD_INPUT_ENABLE | SD_PULL_UP;
++    BOOLEAN IsMariko = ((MmioRead32(SD_APB_MISC_BASE + SD_MISC_HIDREV) >> 4) & 0xF) >= 2;
++    UINT32 Clk = SD_DRIVE_2X | SD_INPUT_ENABLE | (IsMariko ? 0 : SD_PULL_DOWN);
++    UINTN Pin;
++
++    // Card detect.
++    MmioWrite32(SD_PINMUX_AUX_BASE + SD_PIN_PZ1, SD_INPUT_ENABLE | SD_PULL_UP | 2);
++    MmioWrite32(SD_APB_MISC_BASE + SD_MISC_VGPIO_MUX_SEL, 0);
++    gpio_config(GPIO_PORT_Z, GPIO_PIN_1, GPIO_MODE_GPIO);
++    gpio_output_enable(GPIO_PORT_Z, GPIO_PIN_1, GPIO_OUTPUT_DISABLE);
++    MicroSecondDelay(100);
++
++    // Clock loopback, needed for reads to work.
++    MmioWrite32(SD_APB_MISC_BASE + SD_MISC_CLK_LPBK, 1);
++
++    MmioWrite32(SD_PINMUX_AUX_BASE + SD_PIN_CLK, Clk);
++    for (Pin = SD_PIN_CMD; Pin <= SD_PIN_DAT0; Pin += 4) {
++        MmioWrite32(SD_PINMUX_AUX_BASE + Pin, Pad | (IsMariko ? SD_SCHMT : 0));
++    }
++    if (IsMariko) {
++        MmioOr32(SD_PINMUX_AUX_BASE + SD_PIN_CLK, SD_SCHMT);
++    }
++
++    // Controller IO power: left off by hekate.
++    MmioOr32(SD_PMC_BASE + SD_PMC_NO_IOPOWER, SD_PMC_SDMMC1_BIT);
++    MicroSecondDelay(1000);
++    MmioAnd32(SD_PMC_BASE + SD_PMC_NO_IOPOWER, ~(UINT32) SD_PMC_SDMMC1_BIT);
++    (VOID) MmioRead32(SD_PMC_BASE + SD_PMC_NO_IOPOWER);
++
++    MmioWrite32(SD_PINMUX_AUX_BASE + SD_PIN_DMIC3_CLK, SD_PULL_DOWN | 2);
++}
++
++STATIC
++VOID
++SdPowerFinish(VOID)
++{
++    BOOLEAN IsMariko = ((MmioRead32(SD_APB_MISC_BASE + SD_MISC_HIDREV) >> 4) & 0xF) >= 2;
++
++    MicroSecondDelay(10000);
++    MmioOr32(SD_PMC_BASE + SD_PMC_PWR_DET_VAL, SD_PMC_SDMMC1_BIT);
++    (VOID) MmioRead32(SD_PMC_BASE + SD_PMC_PWR_DET_VAL);
++    MicroSecondDelay(1000);
++
++    if (!IsMariko) {
++        MmioWrite32(SD_APB_MISC_BASE + SD_MISC_PAD_CFG,
++            (MmioRead32(SD_APB_MISC_BASE + SD_MISC_PAD_CFG) & 0x0FFFFFFF) | 0x50000000);
++        (VOID) MmioRead32(SD_APB_MISC_BASE + SD_MISC_PAD_CFG);
++        MicroSecondDelay(1000);
++    }
++}
++
++//
++// Progress squares near the end of the framebuffer, so a failed step can be
++// read off the screen without a serial cable. Green: passed. Magenta: failed.
++//
++#define SD_DIAG_FB      0xF5A00000
++#define SD_DIAG_WIDTH   720
++#define SD_DIAG_TOP     1180
++#define SD_DIAG_SIZE    70
++
++STATIC
++VOID
++SdDiag(UINTN Stage, BOOLEAN Passed)
++{
++    volatile UINT32 *Fb = (volatile UINT32 *) (UINTN) SD_DIAG_FB;
++    UINT32 Color = Passed ? 0xFF00FF00 : 0xFFFF00FF;
++    UINTN X, Y;
++    UINTN Left = 20 + (Stage - 1) * 100;
++
++    for (Y = SD_DIAG_TOP; Y < SD_DIAG_TOP + SD_DIAG_SIZE; Y++) {
++        for (X = Left; X < Left + SD_DIAG_SIZE; X++) {
++            Fb[Y * SD_DIAG_WIDTH + X] = Color;
++        }
++    }
++}
+ MMC_CONFIG mConfig;
+ TEGRA_MMC_PRIV mPriv;
+ struct mmc mMmcInstance;
+@@ -643,6 +753,8 @@ SdControllerProbe
+     // sdhci@700b0000
+     mPriv.reg = (VOID*) (UINTN) 0x700b0000;
+ 
++    SdPowerUp();
++
+     // Reset controller 1, &tegra_car 14
+     mClkProtocol->AssertRst(PERIPH_ID_SDMMC1);
+ 
+@@ -672,6 +784,8 @@ SdControllerProbe
+ 	gpio_write(GPIO_PORT_E, GPIO_PIN_4, GPIO_HIGH);
+ 	gpio_output_enable(GPIO_PORT_E, GPIO_PIN_4, GPIO_OUTPUT_ENABLE);
+ 
++    SdPowerFinish();
++
+     return EFI_SUCCESS;
+ }
+ 
+@@ -685,6 +799,7 @@ SdMmcDxeInitialize
+ {
+     EFI_STATUS Status;
+ 	BIO_INSTANCE *Instance;
++	UINTN Stage = 1;
+ 
+     Status = gBS->LocateProtocol(
+         &gTegraUBootClockManagementProtocolGuid,
+@@ -704,9 +819,11 @@ SdMmcDxeInitialize
+ 
+     Status = SdControllerProbe();
+     if (EFI_ERROR(Status)) goto exit;
++    SdDiag(Stage++, TRUE);
+ 
+ 	Status = TegraMmcInit();
+ 	if (EFI_ERROR(Status)) goto exit;
++	SdDiag(Stage++, TRUE);
+ 
+ 	// Check some commands
+ 	int ret = SdFxInit();
+@@ -715,6 +832,7 @@ SdMmcDxeInitialize
+ 		Status = EFI_DEVICE_ERROR;
+ 		goto exit;
+ 	}
++	SdDiag(Stage++, TRUE);
+ 	ret = SdFxInitFinalize();
+ 	if (ret) 
+ 	{
+@@ -722,6 +840,8 @@ SdMmcDxeInitialize
+ 		goto exit;
+ 	}
+ 
++	SdDiag(Stage++, TRUE);
++
+ 	if (mMmcInstance.has_init == 1)
+ 	{
+ 		// Run a self test
+@@ -749,9 +869,12 @@ SdMmcDxeInitialize
+ 		if (!FoundMbr)
+ 		{
+ 			DEBUG((EFI_D_ERROR, "(Protective) MBR not found \n"));
++			SdDiag(Stage, FALSE);
+ 			CpuDeadLoop();
+ 		}
+ 		
++		SdDiag(Stage++, TRUE);
++
+ 		// Install EFI protocol
+ 		ASSERT(mBlkDesc.lba != 0);
+ 		ASSERT(mBlkDesc.blksz != 0);
+@@ -768,8 +891,10 @@ SdMmcDxeInitialize
+ 			&Instance->DevicePath,
+ 			NULL
+ 		);
++		if (!EFI_ERROR(Status)) SdDiag(Stage, TRUE);
+ 	}
+ 
+ exit:
++    if (EFI_ERROR(Status)) SdDiag(Stage, FALSE);
+     return Status;
+ }
+\ No newline at end of file

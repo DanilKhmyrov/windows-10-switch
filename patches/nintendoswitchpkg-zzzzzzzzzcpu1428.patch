@@ -1,0 +1,170 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+index a7839e9..25212dc 100644
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -249,6 +249,156 @@ RamBoost408(VOID)
+     return Status;
+ }
+ 
++// CPU: Windows has no CPU DVFS, so the fast cluster stays at hekate's ~1 GHz.
++// On Mariko (T210B01) raise it statically to 1785.6 MHz (PLLX M=2 N=93 P=/1), HOS boost clock.
++// Voltage first: MAX77812 M4 (I2C5) to 1120 mV, the HOS maximum. NVIDIA's T210B01
++// CVB table needs 910-1030 mV for 1785 MHz (DFLL). Every step is checked; on any doubt nothing is changed, and a
++// PLL that does not lock is put back together with the old voltage.
++#define CPU_CAR                0x60006000
++#define CPU_CCLK_BURST         (CPU_CAR + 0x368)   // CCLKG_BURST_POLICY, as Linux cclk_g
++#define CPU_PLLX_BASE          (CPU_CAR + 0xE0)
++#define CPU_PLLX_MISC          (CPU_CAR + 0xE4)
++#ifndef CPU_BACKUP_SRC
++#define CPU_BACKUP_SRC         0          // 4 = pll_p, 0 = clk_m
++#endif
++STATIC UINT32 mCpuBurstOld;
++// Only the RUN source field (bits 7:4) changes, like clk-super set_parent in Linux.
++#define CPU_BURST_PLLX         mCpuBurstOld
++#define CPU_BURST_PLLP         ((mCpuBurstOld & ~(UINT32) 0xF0) | (CPU_BACKUP_SRC << 4))
++#define CPU_PLL_ENABLE         BIT30
++#define CPU_PLL_LOCK           BIT27
++#define CPU_PLLX_LOCK_EN       BIT18
++#define CPU_PLLX_NEW           0x00005D02     // DIVP 0 (/1), DIVN 93, DIVM 2: 1785.6 MHz
++#define CPU_M4_VOUT            0x26
++#define CPU_VOUT_NEW           0xAE           // (1120 mV - 250 mV) / 5 mV: HOS maximum
++#define CPU_VOUT_MIN_OK        0x5A           // 700 mV: plausible current value
++#define CPU_VOUT_MAX_OK        0xAE
++
++#define CPU_I2C5               0x7000D000
++#define CPU_I2C_CNFG           (CPU_I2C5 + 0x00)
++#define CPU_I2C_ADDR0          (CPU_I2C5 + 0x04)
++#define CPU_I2C_DATA1          (CPU_I2C5 + 0x0C)
++#define CPU_I2C_STATUS         (CPU_I2C5 + 0x1C)
++#define CPU_I2C_LOAD           (CPU_I2C5 + 0x8C)
++
++STATIC
++BOOLEAN
++CpuI2c(UINT8 Addr, BOOLEAN Read, UINT32 *Data, UINT32 Size)
++{
++    UINTN Poll;
++
++    MmioWrite32(CPU_I2C_ADDR0, ((UINT32) Addr << 1) | (Read ? 1 : 0));
++    if (!Read) MmioWrite32(CPU_I2C_DATA1, *Data);
++    MmioWrite32(CPU_I2C_CNFG, ((Size - 1) << 1) | 0x2800 | (Read ? BIT6 : 0));
++    MmioWrite32(CPU_I2C_LOAD, BIT5 | BIT2 | BIT0);
++    for (Poll = 0; Poll < 20 && (MmioRead32(CPU_I2C_LOAD) & BIT0); Poll++) RamUs(1);
++    MmioWrite32(CPU_I2C_CNFG, MmioRead32(CPU_I2C_CNFG) | BIT9);
++    for (Poll = 0; MmioRead32(CPU_I2C_STATUS) & BIT8; Poll++) {
++        if (Poll > 20000) return FALSE;
++        RamUs(1);
++    }
++    if (MmioRead32(CPU_I2C_STATUS) & 0xF) return FALSE;
++    if (Read) *Data = MmioRead32(CPU_I2C_DATA1);
++    return TRUE;
++}
++
++STATIC
++BOOLEAN
++CpuRegRead(UINT8 Addr, UINT8 Reg, UINT8 *Value)
++{
++    UINT32 Data = Reg;
++
++    if (!CpuI2c(Addr, FALSE, &Data, 1) || !CpuI2c(Addr, TRUE, &Data, 1)) return FALSE;
++    *Value = (UINT8) Data;
++    return TRUE;
++}
++
++STATIC
++BOOLEAN
++CpuRegWrite(UINT8 Addr, UINT8 Reg, UINT8 Value)
++{
++    UINT32 Data = Reg | ((UINT32) Value << 8);
++    UINT8 Check;
++
++    if (!CpuI2c(Addr, FALSE, &Data, 2)) return FALSE;
++    return CpuRegRead(Addr, Reg, &Check) && Check == Value;
++}
++
++STATIC
++BOOLEAN
++CpuPllxProgram(UINT32 Cfg)
++{
++    UINTN Poll;
++
++    MmioWrite32(CPU_PLLX_BASE, MmioRead32(CPU_PLLX_BASE) & ~(UINT32) CPU_PLL_ENABLE);
++    RamUs(2);
++    MmioWrite32(CPU_PLLX_MISC, MmioRead32(CPU_PLLX_MISC) | CPU_PLLX_LOCK_EN);
++    MmioWrite32(CPU_PLLX_BASE, Cfg);
++    MmioWrite32(CPU_PLLX_BASE, Cfg | CPU_PLL_ENABLE);
++    for (Poll = 0; Poll < 1000; Poll++) {
++        if (MmioRead32(CPU_PLLX_BASE) & CPU_PLL_LOCK) {
++            RamUs(10);
++            return TRUE;
++        }
++        RamUs(1);
++    }
++    return FALSE;
++}
++
++STATIC
++EFI_STATUS
++CpuBoost1428(VOID)
++{
++    UINT8 Addr = 0, OldVout = 0, Probe;
++    BOOLEAN At31, At33;
++    UINT32 OldPllx;
++    BOOLEAN Ints;
++    EFI_STATUS Status = EFI_SUCCESS;
++
++    if (((MmioRead32(0x70000804) >> 4) & 0xF) != 2) return EFI_UNSUPPORTED;
++    mCpuBurstOld = MmioRead32(CPU_CCLK_BURST);
++    if ((mCpuBurstOld >> 28) != 2 || ((mCpuBurstOld >> 4) & 0xF) != 8) return EFI_UNSUPPORTED;
++    OldPllx = MmioRead32(CPU_PLLX_BASE);
++    if (!(OldPllx & CPU_PLL_ENABLE) || !(OldPllx & CPU_PLL_LOCK)) return EFI_UNSUPPORTED;
++    if ((OldPllx & 0x01FFFFFF) == CPU_PLLX_NEW) return EFI_SUCCESS;
++
++    // The CPU regulator answers at 0x31 or 0x33 depending on the board; exactly one must.
++    At31 = CpuRegRead(0x31, CPU_M4_VOUT, &Probe);
++    if (At31) OldVout = Probe;
++    At33 = CpuRegRead(0x33, CPU_M4_VOUT, &Probe);
++    if (At33) OldVout = Probe;
++    if (At31 == At33) return EFI_NOT_FOUND;
++    Addr = At31 ? 0x31 : 0x33;
++    if (OldVout < CPU_VOUT_MIN_OK || OldVout > CPU_VOUT_MAX_OK) return EFI_UNSUPPORTED;
++
++    if (OldVout < CPU_VOUT_NEW) {
++        if (!CpuRegWrite(Addr, CPU_M4_VOUT, CPU_VOUT_NEW)) {
++            (VOID) CpuRegWrite(Addr, CPU_M4_VOUT, OldVout);
++            return EFI_DEVICE_ERROR;
++        }
++        RamUs(1000);    // 5 mV/us ramp: 320 mV take 64 us
++    }
++
++    Ints = SaveAndDisableInterrupts();
++    MmioWrite32(CPU_CCLK_BURST, CPU_BURST_PLLP);
++    RamUs(5);
++    if (!CpuPllxProgram(CPU_PLLX_NEW)) {
++        // Back to the old setting; the CPU keeps running on PLLP until it locks.
++        (VOID) CpuPllxProgram(OldPllx & 0x01FFFFFF);
++        Status = EFI_DEVICE_ERROR;
++    }
++    if (MmioRead32(CPU_PLLX_BASE) & CPU_PLL_LOCK) {
++        MmioWrite32(CPU_CCLK_BURST, CPU_BURST_PLLX);
++        RamUs(5);
++    }
++    SetInterruptState(Ints);
++
++    if (EFI_ERROR(Status) && OldVout < CPU_VOUT_NEW) {
++        (VOID) CpuRegWrite(Addr, CPU_M4_VOUT, OldVout);
++    }
++    return Status;
++}
++
+ // Windows has no fan driver, so run the fan at a fixed speed. This repeats
+ // what hekate does in fan_set_duty() and regulator_5v_enable().
+ #define FAN_DUTY_MAX    236
+@@ -1081,6 +1231,8 @@ SdMmcDxeInitialize
+ 	(VOID) TouchPowerOn();
+ 	// A failed RAM switch leaves the old clock; boot continues either way.
+ 	(VOID) RamBoost408();
++	// A failed CPU switch leaves the old clock and voltage; boot continues either way.
++	(VOID) CpuBoost1428();
+ 
+ 	Status = TegraMmcInit();
+ 	if (EFI_ERROR(Status)) goto exit;

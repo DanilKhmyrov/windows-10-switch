@@ -1,0 +1,38 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+index a7839e9..39d1d2d 100644
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -1,3 +1,4 @@
++#define CLEAN_BOOT 1   // clean-boot build: screen output in black
+ #include <PiDxe.h>
+ #include <Uefi.h>
+ #include <Library/UefiLib.h>
+diff --git a/Include/Device/EarlyMark.h b/Include/Device/EarlyMark.h
+index 442d230..b3f60c1 100644
+--- a/Include/Device/EarlyMark.h
++++ b/Include/Device/EarlyMark.h
+@@ -1,5 +1,6 @@
+ #ifndef _DEVICE_EARLY_MARK_H_
+ #define _DEVICE_EARLY_MARK_H_
++#define CLEAN_BOOT 1   // clean-boot build: screen output in black
+ 
+ // CLEAN_BOOT: the same drawing (same timing), but in black, so nothing shows.
+ #ifdef CLEAN_BOOT
+diff --git a/Library/NintendoSwitchPlatformLib/Arm/ArmPlatformHelper.S b/Library/NintendoSwitchPlatformLib/Arm/ArmPlatformHelper.S
+index ffe2268..ade1ff0 100644
+--- a/Library/NintendoSwitchPlatformLib/Arm/ArmPlatformHelper.S
++++ b/Library/NintendoSwitchPlatformLib/Arm/ArmPlatformHelper.S
+@@ -1,3 +1,4 @@
++#define CLEAN_BOOT 1   // clean-boot build: screen output in black
+ //
+ // 32-bit (AArch32) version of ArmPlatformHelper.S.
+ //
+diff --git a/Library/Tegra8250SerialPortLib/Tegra8250SerialPortLib.c b/Library/Tegra8250SerialPortLib/Tegra8250SerialPortLib.c
+index 3feff24..bf1329d 100644
+--- a/Library/Tegra8250SerialPortLib/Tegra8250SerialPortLib.c
++++ b/Library/Tegra8250SerialPortLib/Tegra8250SerialPortLib.c
+@@ -1,3 +1,4 @@
++#define CLEAN_BOOT 1   // clean-boot build: screen output in black
+ // Tegra8250SerialPortLib.c: Coreboot-ported serial library
+ // before I figuring out how to use the builtin 16550 serial library.
+ 

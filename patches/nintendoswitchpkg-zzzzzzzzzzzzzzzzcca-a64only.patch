@@ -1,0 +1,12 @@
+--- a/AcpiTables/Dsdt/Dsdt.asl	2026-11-11 10:05:28.703853000 +0000
++++ b/AcpiTables/Dsdt/Dsdt.asl	2026-11-11 10:05:28.731853000 +0000
+@@ -121,6 +121,9 @@
+         {
+             Name (_HID, "PNP0D40")
+             Name (_UID, Zero)
++            // Tegra SDMMC DMA does not snoop the CPU caches. Without _CCA = 0 Windows ARM64
++            // treats the device as coherent, skips cache maintenance, and ADMA reads stale descriptors.
++            Name (_CCA, Zero)
+             Method (_CRS, 0, NotSerialized)
+             {
+                 Return (GCRS (0x700B0000, 0x200, 0x2E))

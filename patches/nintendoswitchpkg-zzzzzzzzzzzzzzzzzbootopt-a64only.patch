@@ -1,0 +1,113 @@
+--- a/Library/PlatformBootManagerLib/PlatformBm.c	2026-11-11 10:35:24.632153012 +0000
++++ b/Library/PlatformBootManagerLib/PlatformBm.c	2026-11-11 10:35:24.649153012 +0000
+@@ -30,6 +30,7 @@
+ #include <Protocol/LoadedImage.h>
+ #include <Protocol/PciIo.h>
+ #include <Protocol/PciRootBridgeIo.h>
++#include <Protocol/SimpleFileSystem.h>
+ #include <Guid/EventGroup.h>
+ #include <Guid/TtyTerm.h>
+ 
+@@ -390,6 +391,92 @@
+ }
+ 
+ 
++#ifdef MDE_CPU_AARCH64
++//
++// Windows setup (22H2) finds the system partition through BootCurrent. The automatic
++// option for the SD card points at the whole disk, without a partition node, and setup
++// fails with "could not update the boot configuration". Register the Windows Boot Manager
++// on its partition with a full device path and put it first in BootOrder.
++// The partition is the one with \EFI\Boot\bootaa64.efi: the ARM32 ESP also has
++// \EFI\Microsoft\Boot\bootmgfw.efi, but a 32-bit one.
++//
++STATIC
++BOOLEAN
++PlatformFileExists (
++  IN EFI_FILE_PROTOCOL  *Root,
++  IN CONST CHAR16       *Path
++  )
++{
++  EFI_FILE_PROTOCOL  *File;
++
++  if (EFI_ERROR (Root->Open (Root, &File, (CHAR16 *) Path, EFI_FILE_MODE_READ, 0))) {
++    return FALSE;
++  }
++  File->Close (File);
++  return TRUE;
++}
++
++STATIC
++VOID
++PlatformRegisterWindowsBootManager (
++  VOID
++  )
++{
++  STATIC CONST CHAR16 Marker[]  = L"\\EFI\\Boot\\bootaa64.efi";
++  STATIC CONST CHAR16 BootMgr[] = L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi";
++  EFI_STATUS                       Status;
++  EFI_HANDLE                       *Handles;
++  UINTN                            Count;
++  UINTN                            Index;
++  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Fs;
++  EFI_FILE_PROTOCOL                *Root;
++  CONST CHAR16                     *Path;
++  EFI_DEVICE_PATH_PROTOCOL         *DevicePath;
++  EFI_BOOT_MANAGER_LOAD_OPTION     NewOption;
++  EFI_BOOT_MANAGER_LOAD_OPTION     *BootOptions;
++  UINTN                            BootOptionCount;
++
++  Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid,
++                  NULL, &Count, &Handles);
++  if (EFI_ERROR (Status)) {
++    return;
++  }
++  for (Index = 0; Index < Count; Index++) {
++    Status = gBS->HandleProtocol (Handles[Index], &gEfiSimpleFileSystemProtocolGuid,
++                    (VOID **) &Fs);
++    if (EFI_ERROR (Status) || EFI_ERROR (Fs->OpenVolume (Fs, &Root))) {
++      continue;
++    }
++    Path = NULL;
++    if (PlatformFileExists (Root, Marker)) {
++      Path = PlatformFileExists (Root, BootMgr) ? BootMgr : Marker;
++    }
++    Root->Close (Root);
++    if (Path == NULL) {
++      continue;
++    }
++    DevicePath = FileDevicePath (Handles[Index], Path);
++    if (DevicePath == NULL) {
++      break;
++    }
++    Status = EfiBootManagerInitializeLoadOption (&NewOption, LoadOptionNumberUnassigned,
++               LoadOptionTypeBoot, LOAD_OPTION_ACTIVE, L"Windows Boot Manager",
++               DevicePath, NULL, 0);
++    FreePool (DevicePath);
++    if (!EFI_ERROR (Status)) {
++      BootOptions = EfiBootManagerGetLoadOptions (&BootOptionCount, LoadOptionTypeBoot);
++      if (EfiBootManagerFindLoadOption (&NewOption, BootOptions, BootOptionCount) == -1) {
++        (VOID) EfiBootManagerAddLoadOptionVariable (&NewOption, 0);
++      }
++      EfiBootManagerFreeLoadOptions (BootOptions, BootOptionCount);
++      EfiBootManagerFreeLoadOption (&NewOption);
++    }
++    break;
++  }
++  FreePool (Handles);
++}
++#endif
++
+ STATIC
+ VOID
+ PlatformRegisterOptionsAndKeys (
+@@ -588,6 +675,9 @@
+   // Enumerate all possible boot options.
+   //
+   EfiBootManagerRefreshAllBootOption ();
++#ifdef MDE_CPU_AARCH64
++  PlatformRegisterWindowsBootManager ();
++#endif
+ 
+   //
+   // Register UEFI Shell

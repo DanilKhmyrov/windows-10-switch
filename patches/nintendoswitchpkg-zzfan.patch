@@ -1,0 +1,89 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+index e8e570c..5e5a6a6 100644
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -70,6 +70,76 @@ PMIC_PROTOCOL* mPmicProtocol;
+ #define SD_SCHMT                    (1 << 12)
+ #define SD_DRIVE_2X                 (1 << 13)
+ 
++// Windows has no fan driver, so run the fan at a fixed speed. This repeats
++// what hekate does in fan_set_duty() and regulator_5v_enable().
++#define FAN_DUTY_MAX    236
++#define FAN_DUTY        118     // 50%
++#define FAN_PWM_CSR     0x7000A010
++#define FAN_PWM_ENABLE  BIT31
++#define FAN_PIN_PWM     0x7000320C
++#define FAN_GPIO_V_CNF  0x6000D504
++#define FAN_5V_PIN      0x7000304C
++#define FAN_GPIO_A_CNF  0x6000D000
++#define FAN_GPIO_A_OE   0x6000D010
++#define FAN_GPIO_A_OUT  0x6000D020
++#define FAN_VBUS_PIN    0x700031A8
++#define FAN_GPIO_CC_CNF 0x6000D700
++#define FAN_GPIO_CC_OE  0x6000D710
++#define FAN_GPIO_CC_OUT 0x6000D720
++#define FAN_PMC_NO_IOPOWER 0x7000E444
++#define FAN_PMC_PWR_DET    0x7000E4E4
++#define FAN_CLK_OUT_ENB_L  0x60006010
++#define FAN_CLK_RST_L_SET  0x60006300
++#define FAN_CLK_RST_L_CLR  0x60006304
++#define FAN_CLK_ENB_L_SET  0x60006320
++#define FAN_CLK_ENB_L_CLR  0x60006324
++#define FAN_CLK_SRC_PWM    0x60006110
++#define FAN_CLK_PWM        BIT17
++
++STATIC
++VOID
++FanStart(VOID)
++{
++    BOOLEAN IsT210 = ((MmioRead32(0x70000804) >> 4) & 0xF) < 2;
++
++    if (!(MmioRead32(FAN_CLK_OUT_ENB_L) & FAN_CLK_PWM)) {
++        MmioWrite32(FAN_CLK_RST_L_SET, FAN_CLK_PWM);
++        MmioWrite32(FAN_CLK_ENB_L_CLR, FAN_CLK_PWM);
++        MmioWrite32(FAN_CLK_SRC_PWM, (6 << 29) | 4);
++        MmioWrite32(FAN_CLK_ENB_L_SET, FAN_CLK_PWM);
++        MicroSecondDelay(2);
++        MmioWrite32(FAN_CLK_RST_L_CLR, FAN_CLK_PWM);
++        (VOID) MmioRead32(FAN_CLK_RST_L_SET);
++    }
++
++    // The clock driver leaves PWM on the 32 kHz source, too slow for the fan.
++    MmioWrite32(FAN_CLK_SRC_PWM, (6 << 29) | 4);
++
++    MmioWrite32(FAN_PWM_CSR, FAN_PWM_ENABLE | (0x100 << 16));
++    MmioWrite32(FAN_PIN_PWM, 1);
++    MmioAnd32(FAN_GPIO_V_CNF, ~(UINT32) BIT4);
++
++    // 5 V supply of the fan.
++    MmioWrite32(FAN_5V_PIN, 1);
++    MmioOr32(FAN_GPIO_A_CNF, BIT5);
++    MmioOr32(FAN_GPIO_A_OUT, BIT5);
++    MmioOr32(FAN_GPIO_A_OE, BIT5);
++    if (IsT210) {
++        MmioWrite32(FAN_VBUS_PIN, BIT8 | 1);
++        MmioOr32(FAN_GPIO_CC_CNF, BIT4);
++        MmioAnd32(FAN_GPIO_CC_OUT, ~(UINT32) BIT4);
++        MmioOr32(FAN_GPIO_CC_OE, BIT4);
++    }
++    MmioAnd32(FAN_PMC_NO_IOPOWER, ~(UINT32) BIT21);
++    (VOID) MmioRead32(FAN_PMC_NO_IOPOWER);
++    MmioAnd32(FAN_PMC_PWR_DET, ~(UINT32) BIT21);
++    (VOID) MmioRead32(FAN_PMC_PWR_DET);
++
++    // The PWM polarity is inverted.
++    MmioWrite32(FAN_PWM_CSR, FAN_PWM_ENABLE | ((UINT32) (FAN_DUTY_MAX - FAN_DUTY) << 16));
++    MmioWrite32(FAN_PIN_PWM, 1);
++}
++
+ STATIC
+ VOID
+ SdPowerUp(VOID)
+@@ -823,6 +893,7 @@ SdMmcDxeInitialize
+ 
+ 	// The slot stays at 3.3 V: hide the 1.8 V UHS modes (SDR104, SDR50) from Windows.
+ 	MmioAnd32(0x700B0120, ~(UINT32) 0x18);
++	FanStart();
+ 
+ 	Status = TegraMmcInit();
+ 	if (EFI_ERROR(Status)) goto exit;

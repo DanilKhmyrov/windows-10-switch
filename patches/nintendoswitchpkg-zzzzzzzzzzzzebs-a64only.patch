@@ -1,0 +1,40 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+index a680664..73dea3f 100644
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -559,6 +559,24 @@ BpmpEmcRaise(UINT32 TargetKhz)
+     return Rate > 1000000000ULL ? EFI_SUCCESS : EFI_DEVICE_ERROR;
+ }
+ 
++// AArch64: ATF starts secondary cores at EL2, where Windows cannot run. The bl33 shim at
++// EL2 fixes that by trapping PSCI CPU_ON, but only from the moment the OS takes over:
++// UEFI signals it on ExitBootServices by reading ACTLR_EL1, which the shim traps (HCR_EL2.TACR);
++// HVC cannot be used: ATF may disable it (SCR_EL3.HCE = 0), then it is undefined at EL1.
++#ifdef MDE_CPU_AARCH64
++STATIC EFI_EVENT mShimEbsEvent;
++
++STATIC
++VOID
++EFIAPI
++ShimOnExitBootServices(IN EFI_EVENT Event, IN VOID *Context)
++{
++    register UINT64 X0 __asm__("x0") = 0;
++
++    __asm__ volatile("mrs x0, actlr_el1" : "+r"(X0) : : "memory");
++}
++#endif
++
+ // Windows has no fan driver, so run the fan at a fixed speed. This repeats
+ // what hekate does in fan_set_duty() and regulator_5v_enable().
+ #define FAN_DUTY_MAX    236
+@@ -1390,6 +1408,10 @@ SdMmcDxeInitialize
+ 	StepMark(1, TRUE);
+ 	// A touch failure must not stop the boot from the SD card.
+ 	(VOID) TouchPowerOn();
++#ifdef MDE_CPU_AARCH64
++	(VOID) gBS->CreateEvent(EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY,
++	    ShimOnExitBootServices, NULL, &mShimEbsEvent);
++#endif
+ 	StepMark(2, TRUE);
+ 	// A failed RAM switch leaves the old clock; boot continues either way.
+ 	// RAM: BPMP firmware switches EMC to 1600 MHz (RamBoost408 must not be used with it).

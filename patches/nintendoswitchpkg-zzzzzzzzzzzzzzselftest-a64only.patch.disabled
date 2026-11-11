@@ -1,0 +1,97 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+index 73dea3f..e24546a 100644
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -577,6 +577,84 @@ ShimOnExitBootServices(IN EFI_EVENT Event, IN VOID *Context)
+ }
+ #endif
+ 
++#ifdef MDE_CPU_AARCH64
++// Shim self-test marks: row y 990-1010, 3 squares. Green = passed, magenta = failed.
++STATIC
++VOID
++ShimMark(UINTN Step, BOOLEAN Ok)
++{
++    volatile UINT32 *Fb = (volatile UINT32 *) (UINTN) 0xF5A00000;
++    UINTN X, Y;
++    UINTN Left = 300 + (Step - 1) * 60;
++
++    for (Y = 990; Y < 1010; Y++) {
++        for (X = Left; X < Left + 40; X++) {
++            Fb[Y * 720 + X] = Ok ? 0xFF20FF20 : 0xFFFF00FF;
++        }
++    }
++}
++
++STATIC
++UINT64
++ShimSmc(UINT64 Fn, UINT64 A1, UINT64 A2, UINT64 A3)
++{
++    register UINT64 X0 __asm__("x0") = Fn;
++    register UINT64 X1 __asm__("x1") = A1;
++    register UINT64 X2 __asm__("x2") = A2;
++    register UINT64 X3 __asm__("x3") = A3;
++
++    __asm__ volatile("smc #0" : "+r"(X0), "+r"(X1), "+r"(X2), "+r"(X3) : : "memory");
++    return X0;
++}
++
++// Core 1 starts here at EL1 (MMU and caches off), x0 = context: paints a yellow square
++// at x 480-520 and powers itself off (PSCI CPU_OFF).
++VOID ShimApEntry(VOID);
++__asm__(
++    ".global ShimApEntry\n"
++    ".balign 4\n"
++    "ShimApEntry:\n"
++    "    mov   x1, #0xF5A00000\n"
++    "    mov   x2, #990\n"
++    "1:  mov   x3, #720\n"
++    "    mul   x4, x2, x3\n"
++    "    add   x4, x4, #480\n"
++    "    add   x4, x1, x4, lsl #2\n"
++    "    mov   x5, #40\n"
++    "    movz  w6, #0xFF00\n"
++    "    movk  w6, #0xFFFF, lsl #16\n"
++    "2:  str   w6, [x4], #4\n"
++    "    subs  x5, x5, #1\n"
++    "    b.ne  2b\n"
++    "    add   x2, x2, #1\n"
++    "    cmp   x2, #1010\n"
++    "    b.ne  1b\n"
++    "    dsb   sy\n"
++    "    movz  x0, #0x0002\n"
++    "    movk  x0, #0x8400, lsl #16\n"
++    "    smc   #0\n"
++    "3:  wfe\n"
++    "    b     3b\n"
++);
++
++STATIC
++VOID
++ShimSelfTest(VOID)
++{
++    register UINT64 X0 __asm__("x0") = 0;
++    UINT64 R;
++
++    __asm__ volatile("mrs x0, actlr_el1" : "+r"(X0) : : "memory");     // 1: signal to the shim
++    ShimMark(1, X0 == 0x5357534D);
++    if (X0 != 0x5357534D) return;
++    R = ShimSmc(0x84000000, 0, 0, 0);                                   // 2: PSCI_VERSION via the shim
++    ShimMark(2, R >= 0x10000 && R < 0x100000);
++    R = ShimSmc(0xC4000003, 0x1, (UINT64) (UINTN) ShimApEntry, 0x1234); // 3: CPU_ON core 1
++    ShimMark(3, R == 0);
++    MicroSecondDelay(200000);
++}
++#endif
++
+ // Windows has no fan driver, so run the fan at a fixed speed. This repeats
+ // what hekate does in fan_set_duty() and regulator_5v_enable().
+ #define FAN_DUTY_MAX    236
+@@ -1409,6 +1487,7 @@ SdMmcDxeInitialize
+ 	// A touch failure must not stop the boot from the SD card.
+ 	(VOID) TouchPowerOn();
+ #ifdef MDE_CPU_AARCH64
++	ShimSelfTest();
+ 	(VOID) gBS->CreateEvent(EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY,
+ 	    ShimOnExitBootServices, NULL, &mShimEbsEvent);
+ #endif

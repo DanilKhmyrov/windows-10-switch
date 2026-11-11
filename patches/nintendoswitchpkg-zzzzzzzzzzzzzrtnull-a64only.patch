@@ -1,0 +1,17 @@
+diff --git a/NintendoSwitch.dsc b/NintendoSwitch.dsc
+index 6215c6d..88a4383 100644
+--- a/NintendoSwitch.dsc
++++ b/NintendoSwitch.dsc
+@@ -178,6 +178,12 @@
+   PerformanceLib|MdeModulePkg/Library/DxePerformanceLib/DxePerformanceLib.inf
+   SecurityManagementLib|MdeModulePkg/Library/DxeSecurityManagementLib/DxeSecurityManagementLib.inf
+ 
++# Runtime drivers keep running under the OS after SetVirtualAddressMap: no debug output to
++# the UART and framebuffer by physical address (it crashed the Windows ARM64 kernel).
++[LibraryClasses.AARCH64.DXE_RUNTIME_DRIVER]
++  DebugLib|MdePkg/Library/BaseDebugLibNull/BaseDebugLibNull.inf
++  SerialPortLib|MdePkg/Library/BaseSerialPortLibNull/BaseSerialPortLibNull.inf
++
+ [LibraryClasses.ARM.DXE_RUNTIME_DRIVER]
+   DebugLib|MdePkg/Library/BaseDebugLibNull/BaseDebugLibNull.inf
+   SerialPortLib|MdePkg/Library/BaseSerialPortLibNull/BaseSerialPortLibNull.inf

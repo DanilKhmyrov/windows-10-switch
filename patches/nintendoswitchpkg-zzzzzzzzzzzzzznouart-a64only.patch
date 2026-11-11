@@ -1,0 +1,15 @@
+diff --git a/AcpiTables/Dsdt/Dsdt.asl b/AcpiTables/Dsdt/Dsdt.asl
+index 38e0f7b..0df16c4 100644
+--- a/AcpiTables/Dsdt/Dsdt.asl
++++ b/AcpiTables/Dsdt/Dsdt.asl
+@@ -110,7 +110,9 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
+ 
+             Method (_STA, 0, NotSerialized)
+             {
+-                Return (0x0F)
++                // AArch64: UART B is not clocked; Windows ARM64 has an inbox driver for NVDA0100
++                // and touching it raised an SError. Hidden from the OS.
++                Return (Zero)
+             }
+         }
+ 

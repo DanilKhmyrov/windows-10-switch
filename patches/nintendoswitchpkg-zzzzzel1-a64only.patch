@@ -1,0 +1,13 @@
+diff --git a/NintendoSwitch.dsc b/NintendoSwitch.dsc
+index 8f001ac..d7a522d 100644
+--- a/NintendoSwitch.dsc
++++ b/NintendoSwitch.dsc
+@@ -296,7 +296,7 @@
+   # Core configs
+   gArmTokenSpaceGuid.PcdArmPrimaryCore|0
+   gArmTokenSpaceGuid.PcdArmPrimaryCoreMask|0xf03
+-  gArmTokenSpaceGuid.PcdArmArchTimerFreqInHz|19200000
++  gArmTokenSpaceGuid.PcdArmArchTimerFreqInHz|0
+ 
+   # Performance
+   gEfiMdePkgTokenSpaceGuid.PcdPerformanceLibraryPropertyMask|1
