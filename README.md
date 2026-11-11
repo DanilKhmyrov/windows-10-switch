@@ -1,5 +1,12 @@
 # Windows 10 Switch
 
+> **Built by Claude.** Almost everything in this repository was written by Claude, Anthropic's AI
+> assistant, working in Claude Code. That covers the EL2 shim, the UEFI patches, the drivers, the
+> image and card tooling, the debugging (from the bit-row error displays to the stage-2 SD access
+> log) and this documentation. [Danil Khmyrov](https://github.com/DanilKhmyrov) owns the project and
+> the console. He set the goals and ran every build on real hardware, reporting back with photos of
+> the screen.
+
 Native Windows 10 on the Nintendo Switch: no emulation, no Linux underneath. Hekate starts our
 own EL2 shim, the shim starts a patched [NintendoSwitchPkg](https://github.com/imbushuo/NintendoSwitchPkg)
 UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
