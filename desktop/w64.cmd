@@ -5,6 +5,13 @@ set LOG=%1:\agent\w64-log.txt
 echo ==== BOOT %date% %time% >> %LOG%
 reg query HKLM\SYSTEM\Setup /v SystemSetupInProgress >> %LOG% 2>&1
 reg query HKLM\SYSTEM\Setup /v OOBEInProgress >> %LOG% 2>&1
+rem While Windows Setup is running (specialize/OOBE) only log: installing drivers or changing
+rem settings here, and above all rebooting, breaks setup (the registry turns read-only during
+rem shutdown and setup fails with "could not configure Windows to run on this hardware").
+reg query HKLM\SYSTEM\Setup /v SystemSetupInProgress 2>nul | find "0x1" >nul && (
+  echo -- setup in progress, nothing else to do >> %LOG%
+  goto :eof
+)
 echo -- power >> %LOG%
 powercfg /change monitor-timeout-ac 0 >> %LOG% 2>&1
 powercfg /change monitor-timeout-dc 0 >> %LOG% 2>&1

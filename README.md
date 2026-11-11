@@ -236,6 +236,10 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
   `HKLM\SYSTEM\Setup\Status\ChildCompletion\setup.exe = 3`.
 - **BCD `truncatememory` is not honoured** by ARM64 Windows for DMA buffers.
 - Moving the 64-bit UEFI's memory region below 4 GB breaks its early start.
+- **"Windows could not configure Windows to run on this computer's hardware"** (Windows 11 setup):
+  our boot agent installed drivers and rebooted in the middle of the specialize pass, and once
+  shutdown starts the registry is read-only (errors 19 and 13 in `setupact.log`). The agent now
+  does nothing but log while `HKLM\SYSTEM\Setup\SystemSetupInProgress` is 1.
 - **ARM64 drivers failed with STATUS_DRIVER_UNABLE_TO_LOAD** (Kernel-PnP event 219): ARM64 code is
   PC-relative, so lld emitted no `.reloc` section, and the kernel will not load a driver it cannot
   relocate. One absolute pointer in the image forces a relocation table.
