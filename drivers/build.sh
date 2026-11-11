@@ -1,9 +1,15 @@
 #!/bin/bash
-# Runs inside the switch-wp-drivers container. Builds and signs an ARM32 driver.
+# Runs inside the switch-wp-drivers container. Builds and signs a driver.
 #   build.sh <name> <source.c> <output.sys>   EWDK=path to "Windows Kits/10"
 #   ENTRY=DriverEntry: driver without WDF; HASH=sha1: different signing hash
+#   ARCH=arm64: ARM64 WDM driver. The WDK 14393 headers already support ARM64, and the import
+#     libraries are generated from the exports of the real ARM64 binaries in REFBIN (a folder
+#     with ntoskrnl.exe, hal.dll, battc.sys, hidclass.sys taken from the Windows image).
 set -euo pipefail
 NAME="$1"; SRC="$2"; OUT="$3"
+if [ "${ARCH:-arm}" = arm64 ]; then
+    exec "$(dirname "$0")/build_arm64.sh" "$NAME" "$SRC" "$OUT"
+fi
 I="$EWDK/Include"; L="$EWDK/Lib"; KM="$I/10.0.14393.0"
 A="$L/10.0.14393.0/km/arm"; W="$L/wdf/kmdf/arm/1.19"
 TMP="$(mktemp -d)"

@@ -587,7 +587,7 @@ static NTSTATUS StartPolling(VOID)
     KeClearEvent(&g_stop);
     status = PsCreateSystemThread(&handle, THREAD_ALL_ACCESS, NULL, NULL, NULL, PollThread, NULL);
     if (NT_SUCCESS(status)) {
-        ObReferenceObjectByHandle(handle, THREAD_ALL_ACCESS, *PsThreadType, KernelMode, &g_thread, NULL);
+        ObReferenceObjectByHandle(handle, THREAD_ALL_ACCESS, NULL, KernelMode, &g_thread, NULL);
         ZwClose(handle);
     }
     return status;

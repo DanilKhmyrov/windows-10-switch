@@ -85,6 +85,11 @@ cp "$MNT/Windows/Boot/EFI/bootmgfw.efi" "$ESP/EFI/Boot/bootaa64.efi"
     "$SIGNATURE" "$START_MIB" "$BOOT_MIB"
 mkdir -p "$ESP/agent"
 cp "$HERE/w64.cmd" "$ESP/agent/w64.cmd"
+# ARM64 touch and battery drivers, if built (drivers/build.sh with ARCH=arm64); w64.cmd installs them.
+if [ -f "$HERE/../drivers/out/arm64/swhid.sys" ]; then
+    mkdir -p "$ESP/agent/arm64"
+    cp "$HERE/../drivers/out/arm64/swhid.sys" "$HERE/../drivers/out/arm64/swbatt.sys" "$ESP/agent/arm64/"
+fi
 du -sh "$ESP"
 echo "$SIGNATURE $START_MIB $BOOT_MIB $SIZE_MIB" > "$OUT/card.txt"
 sync
