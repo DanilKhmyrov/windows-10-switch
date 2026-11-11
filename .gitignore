@@ -1,10 +1,10 @@
-# Сборки: выкладываются отдельно (релизы), не в репозиторий
+# Build outputs: published separately (releases), not in the repository
 uefi/out/
 drivers/out/
 shim/*.bin
 *.fd
 
-# Файлы Microsoft и WDK: не распространять
+# Microsoft and WDK files: do not redistribute
 windows/out/
 *.efi
 *.sys
@@ -16,12 +16,12 @@ windows/out/
 BCD
 BCD.*
 
-# Закрытый ключ тестовой подписи драйверов
+# Private key of the driver test-signing certificate
 drivers/test-cert/*.key
 *.pfx
 *.pvk
 
-# Рабочий мусор
+# Working leftovers
 __pycache__/
 *.pyc
 *.bak*

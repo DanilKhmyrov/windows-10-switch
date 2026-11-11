@@ -1,169 +1,194 @@
 # Windows 10 Switch
 
-Windows 10 на Nintendo Switch (Mariko, T210B01) нативно, без эмуляторов: Hekate → ATF (bl31) →
-наша прокладка (`shim/`) → UEFI на основе NintendoSwitchPkg (`patches/`) → Windows.
+Native Windows 10 on the Nintendo Switch: no emulation, no Linux underneath. Hekate starts our
+own EL2 shim, the shim starts a patched [NintendoSwitchPkg](https://github.com/imbushuo/NintendoSwitchPkg)
+UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 
-- **ARM32 (Windows 10 build 15035)**: рабочий стол, тач, батарея и вентилятор, «Пуск»,
-  процессор 1785 МГц, память ~1600 МГц.
-- **ARM64 (Windows 10 Pro 22H2, 19041)**: 2026-11-11 дошла до рабочего стола (пока одно ядро,
-  отладочный перехват SD включён, без тача и батареи).
+| Windows 10 ARM32 (build 15035) | ARM32 Start menu and Action Center | Windows 10 ARM64 (22H2) |
+|:---:|:---:|:---:|
+| ![ARM32 desktop](docs/screenshots/arm32-desktop.jpg) | ![ARM32 Start menu](docs/screenshots/arm32-start-menu.jpg) | ![ARM64 desktop](docs/screenshots/arm64-desktop.jpg) |
 
-Главный принцип проекта: не навредить консоли.
+> **The first rule of this project is not to harm the console.** Everything here was tested on one
+> Mariko unit (T210B01, HAC-001-01). Clock and voltage changes stay within the limits used by
+> Horizon. Use at your own risk.
 
-## Лицензии и что не входит в репозиторий
+## Status
 
-Наш код (прокладка, драйверы, скрипты, патчи) распространяется по GPL-2.0, см. `LICENSE`.
-Патчи применяются к [NintendoSwitchPkg](https://github.com/imbushuo/NintendoSwitchPkg) и EDK2:
-на код из этих проектов действуют их собственные лицензии.
+| | Windows 10 ARM32 | Windows 10 ARM64 |
+|---|---|---|
+| Build | 15035 (Enterprise Insider Preview) | 19041/19045 (22H2 Pro) |
+| Boot to desktop | yes, autologon as user `Player` | yes, autologon as user `Player` |
+| CPU cores | 1 | 4 (via PSCI trapping in the shim, being tested) |
+| SD card | inbox `sdbus` | inbox `sdbus` through the shim's stage-2 trap |
+| Touch screen | yes, multi-touch (`drivers/swhid`) | not yet (driver is ARM32-only so far) |
+| Battery, charger, fan, overheat shutdown | yes (`drivers/swbatt`) | not yet |
+| CPU / RAM clocks | 1785 MHz at 1120 mV / ~1600 MHz | same UEFI code |
+| Display | GOP framebuffer (Basic Display), portrait | same |
+| USB, Wi-Fi, Bluetooth, audio, GPU | no | no |
 
-Не выкладываются и не должны попадать сюда: файлы Microsoft (образы, загрузчики, BCD),
-драйверы, собранные с WDK, закрытый ключ тестовой подписи, готовые сборки UEFI
-(`uefi/out`) — см. `.gitignore`. Всё это собирается или скачивается заново по инструкциям ниже.
+## How it works
 
-## Состояние на 2026-11-11 (поздно): ARM64
+```
+Hekate (l4t=1) ──> BL31 (ATF, EL3) ──> shim, bl33 (EL2) ──> UEFI (EL1) ──> Windows Boot Manager ──> Windows (EL1)
+```
 
-Зависание на кружке разобрано через отладку в EL2: вторая ступень трансляции перехватывает
-страницу SD-контроллеров (0x700B0000) и пишет журнал обращений, при первой SError он
-выводится на экран.
+### Shim (`shim/`)
 
-- **DMA SD-карты**: sdbus брал 64-битный ADMA2, а Windows ARM64 считала контроллер
-  кэш-когерентным. Контроллер читал из таблицы DMA мусор, и шина периферии зависала.
-  Лечится `_CCA = 0` у SDC1 (`patches/*cca-a64only.patch`); прокладка также скрывает бит
-  64-битной шины в регистре возможностей (0x40).
-- **«Не удалось обновить конфигурацию загрузки»**: установщик ищет раздел загрузчика через
-  `BootCurrent`. UEFI теперь регистрирует «Windows Boot Manager» с полным путём к разделу
-  CRASHDUMP (`patches/*bootopt-a64only.patch`).
-- Перенос всей памяти UEFI ниже 4 ГБ ломает ранний старт (`*lowmem2*.disabled`).
-- **Ранний старт ARM64**: UEFI держит раннюю память выше 4 ГБ, а BPMP ещё калибрует её.
-  Для ARM64 пауза в прокладке 10 с (`shim/build.py --delay-ms 10000`).
-- **«Компьютер неожиданно перезагрузился»** после сбоя установки: в кусте SYSTEM
-  `Setup\Status\ChildCompletion\setup.exe = 3`. CRASHDUMP без буквы: `MountedDevices`
-  `\DosDevices\G:` = подпись диска + смещение раздела. Куст на карте меняется на месте:
-  `desktop/replace_extent.py` (проверяет старое содержимое перед записью),
-  `desktop/sync_from_card.py` обновляет образ раздела по карте.
+Hekate's L4T loader starts `bl33.bin` at 0xAA000000 in EL2. The shim:
 
----
+- waits a few seconds (`--delay-ms`): on Mariko the BPMP firmware is still training DRAM after
+  Hekate, and early UEFI hung while that was in progress (3 s for ARM32, 10 s for ARM64, whose
+  early UEFI memory sits above 4 GB);
+- copies UEFI to 0x80110000 and drops to EL1, either AArch32 (`chain32`) or AArch64 (`chain`);
+- **ARM64 only** stays resident as a minimal hypervisor in reserved memory:
+  - **SMC/PSCI trapping** (`HCR_EL2.TSC`). ATF starts secondary cores at EL2, so `PSCI CPU_ON`
+    is rewritten to enter `secondary_entry`, which drops the new core to EL1 and jumps to the
+    Windows entry point;
+  - the trap is switched on only when UEFI hands over to the OS. UEFI signals this by reading
+    `ACTLR_EL1` (trapped through `HCR_EL2.TACR`), because ATF disables HVC;
+  - **stage-2 translation** maps everything 1:1 except the SDMMC page 0x700B0000. Windows
+    accesses to it are emulated with the same width and logged, and bit 28 ("64-bit system bus")
+    of the SDMMC1 capabilities register is cleared, so `sdbus` uses 32-bit ADMA2 like ARM32 does;
+  - **SError handling** (`HCR_EL2.AMO`): an asynchronous bus error is swallowed. On the first one,
+    ESR, ELR and the latest SD register accesses are drawn as bit rows at the top of the screen.
+    This is how the ARM64 hangs below were diagnosed without a UART.
 
-# Первый шаг: Windows Phone на Switch
+### UEFI (`uefi/`, `patches/`)
 
-Здесь лежит маленькая программа-«прокладка» (`bl33.bin`). Hekate запускает её вместо
-обычного загрузчика Linux. Она отвечает на вопрос: может ли консоль дойти до режима,
-в котором работает Windows 10 Mobile.
+`uefi/build.sh` builds NintendoSwitchPkg on `edk2-stable202102` in Docker and applies
+`patches/*.patch` in alphabetical order. Patches named `*-a64only.patch` go into the 64-bit build
+only, and `*-cleanonly.patch` only into `CLEAN=1` builds.
 
-**Переразмечать карту не нужно.** Тест добавляет один файл и одну запись в меню.
-Linux, Android и Horizon не затрагиваются.
-
-## Как проверить
-
-1. Создай на FAT32-разделе карты папку `wp/`.
-2. Скопируй туда:
-   - `shim/bl33.bin` из этого проекта;
-   - `bl31.bin` из папки твоего Linux, например `switchroot/ubuntu/` (имя зависит от дистрибутива).
-3. Проверь, что твой Linux свежий: Hekate v6.5.4 ждёт системные файлы ревизии 7
-   в `bootloader/sys/l4t/`. Если Linux сейчас загружается, с ними всё в порядке.
-4. Создай файл `bootloader/ini/wp.ini`:
-
-   ```ini
-   [Windows Phone Test]
-   l4t=1
-   boot_prefixes=wp/
-   uart_port=2
-   ```
-
-5. Запусти этот пункт в Hekate и посмотри на экран.
-
-## Что значит цвет экрана
-
-| Экран | Что это значит |
+| Patch | What it does |
 |---|---|
-| Белый | Успех: процессор перешёл в 32-битный режим. |
-| Зелёный и не меняется | Прокладка работает, но переход в 32-битный режим не удался. |
-| Маджента (розовый) | Запуск не на том уровне привилегий (не EL2). |
-| Логотип или чёрный экран | Прокладка не запустилась, либо экран погас раньше неё. |
+| `hekate`, `sd-power`, `zsdhost` | boot from Hekate's L4T entry; power up SDMMC1 the way Hekate does; SD host fixes; describe SDMMC1 (`PNP0D40`) in the DSDT |
+| `zarm32` | 32-bit (ARM) build of the package |
+| `zzfan` | fan on at boot |
+| `zzztouch`, `zzzztouchacpi` | touch panel power-up, `SWTS0001` ACPI device for the HID driver |
+| `zzzzzzzclean`, `*clean-cleanonly` | optional black (clean) boot screen |
+| `*cpu1428` | CPU 1785.6 MHz at 1120 mV (MAX77812 over I2C5, PLLX reprogrammed while running from clk_m) |
+| `*bpmp` | RAM ~1600 MHz: asks the BPMP firmware over IPC (`MRQ_CLK`, clock `emc`) |
+| `*ram408` | older Hekate-style RAM boost (unused, must not be combined with BPMP) |
+| `*diag` | small progress marks at the bottom of the screen |
+| `*el1-a64only`, `*shim-a64only`, `*ebs-a64only` | AArch64 at EL1; reserve the shim's 1 MB; ExitBootServices signal to the shim |
+| `*rtnull-a64only` | Null DebugLib/SerialPortLib for runtime drivers (they crashed after SetVirtualAddressMap) |
+| `*nouart-a64only` | hide UART B (`NVDA0100`): it is unclocked and the inbox ARM64 driver hit an SError |
+| `*cca-a64only` | `_CCA = 0` on SDMMC1: Tegra SDMMC DMA does not snoop CPU caches |
+| `*bootopt-a64only` | register "Windows Boot Manager" with a full partition device path (needed by Windows Setup) |
 
-Выйти из теста: зажать кнопку питания примерно на 12 секунд.
+### Windows images (`desktop/`)
 
-## Запуск настоящего UEFI (следующий шаг)
+Windows files are not part of this repository. The scripts build NTFS partition images from your own
+Microsoft images inside a Linux container (`ntfs-3g`, `hivex`, `wimlib`):
 
-Нужен запущенный Docker. Сценарий сам скачает исходники и наложит патч.
+- `build_w32.sh`: Windows 10 ARM32 from a 15035 archive. Adds the answer file, the `swagent`
+  diagnostics service, the drivers, and a setup wrapper that keeps the setup logs.
+- `build_w64.sh`: Windows 10 ARM64 from an ESD, same tricks.
+- `make_bcd.sh`, `make_bcd64.sh`, `bcdlib.py`: BCD stores pointing at the MBR partitions.
+- `skip_bcd_step.sh`: removes `Sysprep_Specialize_Bcd`, which needs persistent UEFI variables.
+- `setup_arm64_card.py`, `put_bl33.sh`, `put_bcd.sh`, `finalize_menu.py`, `make_icon.py`: install
+  onto the card and the Hekate menu.
+- `pull_win.py`, `push_win.py`, `img_sums.py`, `sync_from_card.py`, `replace_extent.py`,
+  `hive_recover.py`, `setup_mode.sh`, `finish_setup.sh`: offline maintenance. They copy a partition,
+  write back only the changed MiB, patch a registry hive in place, and recover hives left dirty
+  by a power-off.
+- `w32.cmd`, `w64.cmd`: run by `swagent` on every boot from the CRASHDUMP partition. The Mac can
+  edit them without root, and they write logs that can be read back from the Mac.
 
-1. Собери UEFI:
+### Drivers (`drivers/`)
 
-   ```bash
-   ./uefi/build.sh
-   ```
+KMDF/WDM drivers built in Docker with an extracted Enterprise WDK (not included), test-signed:
 
-2. Заверни его в прокладку:
+- `swhid`: HID touch screen digitizer for the FTS4 panel on I2C3 (up to 5 fingers);
+- `swbatt`: battery class miniport (MAX17050 fuel gauge, BQ24193 charger, TMP451 temperature),
+  fan curve and overheat shutdown.
 
-   ```bash
-   python3 shim/build.py chain uefi/out/NintendoSwitch.fd -o uefi/out/bl33.bin
-   ```
+Both are ARM32 only for now; ARM64 builds are next.
 
-3. Положи `uefi/out/bl33.bin` на карту как `wp/bl33.bin`.
+## SD card layout (MBR)
 
-## 32-битный UEFI
+| # | Start | Size | Contents |
+|---|---|---|---|
+| 1 | 2 MiB | | FAT32, type EF: Hekate, `wp/` (ARM32 loader), `wp64/` (ARM64 loader), ARM32 boot manager and BCD |
+| 2 | 10815 MiB | 12 GiB | NTFS: Windows 10 ARM32 |
+| 3 | 1416 MiB | 600 MB | FAT `CRASHDUMP`: ARM64 boot manager and BCD, `agent\` scripts and logs |
+| 4 | 23104 MiB | 24 GiB | NTFS: Windows 10 ARM64 |
 
-Эта версия нужна для загрузчика Windows 10 Mobile.
+Hekate menu entries (`bootloader/ini/*.ini`):
 
-```bash
-ARCH=ARM ./uefi/build.sh
+```ini
+[Windows 10 ARM32]
+l4t=1
+boot_prefixes=wp/
+uart_port=2
+
+[Windows 10 ARM64]
+l4t=1
+boot_prefixes=wp64/
+uart_port=2
 ```
 
+Each folder holds `bl31.bin` (from an L4T release) and our `bl33.bin`.
+
+## Building
+
+Requirements: macOS or Linux with `clang`, Docker, Python 3. For images: your own Windows 10 ARM32
+15035 / ARM64 ESD. For drivers: an extracted Enterprise WDK.
+
 ```bash
-python3 shim/build.py chain32 uefi/out/NintendoSwitch-arm.fd -o uefi/out/bl33-arm.bin
+# 32-bit UEFI + shim (ARM32)
+./uefi/build_bl33.sh uefi/out/bl33-arm.bin
+
+# 64-bit UEFI + shim (ARM64); repack with a longer start-up delay
+ARCH=AARCH64 ./uefi/build_bl33.sh uefi/out/bl33-64.bin
+python3 shim/build.py chain uefi/out/NintendoSwitch.fd --clean --delay-ms 10000 -o uefi/out/bl33-64.bin
+
+# put a loader on the card (macOS, card exposed by Hekate's USB tools)
+sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 ```
 
-На карту файл кладётся как `wp/bl33.bin`.
+`shim/test_shim.py` runs the shim in Unicorn to check its control flow without a console.
 
-## Что проверено, а что нет
+## Lessons learned
 
-На настоящей консоли проверено: запуск прокладки из Hekate, уровень EL2, переход в
-32-битный режим, 64-битный и 32-битный UEFI с Shell, чтение разделов и файлов на SD.
+- **Early UEFI hang after mark 6** on Mariko: BPMP DRAM training races UEFI start. Fixed with a
+  delay in the shim.
+- **All EL2 traps hung**: `SP_EL2` was never set because `SPSel` was 0. Set `SPSel=1` before
+  setting the handler stack.
+- **ARM64 runtime services crashed** after `SetVirtualAddressMap`: runtime drivers still used the
+  serial/debug libraries. Fixed with Null libraries.
+- **INACCESSIBLE_BOOT_DEVICE** on ARM64: `sdbus`/`sdstor` must be boot-start (`Start=0`).
+- **ARM64 froze at the spinner, whole peripheral bus dead.** The stage-2 SD access log showed
+  64-bit ADMA2 reading stale descriptors. Windows ARM64 treats devices without `_CCA` as cache
+  coherent and skips cache maintenance, but Tegra SDMMC is not coherent. Fixed with `_CCA = 0` and
+  32-bit DMA.
+- **"Windows could not update the computer's boot configuration"**: Windows Setup finds its system
+  partition through `BootCurrent`. EDK2's automatic removable-media option has no partition
+  node, so UEFI now registers a full-path option. After such a failure, set
+  `HKLM\SYSTEM\Setup\Status\ChildCompletion\setup.exe = 3`.
+- **BCD `truncatememory` is not honoured** by ARM64 Windows for DMA buffers.
+- Moving the 64-bit UEFI's memory region below 4 GB breaks its early start.
 
-В эмуляторе (`shim/test_shim.py`): цвета, UART, копирование UEFI и переход на него.
+## Roadmap
 
-Ещё не проверено:
+- ARM64: clean up diagnostics, confirm 4-core stability, ARM64 builds of `swhid` and `swbatt`.
+- USB host (XUSB firmware load in UEFI + inbox XHCI), then networking.
+- Wi-Fi, Bluetooth and audio. [winx](https://github.com/steck0714/winx) has GPL-2.0 ARM64
+  drivers for these, to be reviewed and ported.
+- ARM32 on 4 cores through the same PSCI trapping (needs an AArch32 trap path).
+- Windows 11 ARM64 up to 23H2. 24H2 and later need ARMv8.1 atomics, which Cortex-A57 lacks.
 
-- загрузка Windows.
+## Credits
 
-В 32-битной сборке отладочный лог и цветные метки выводятся прямо на экран. Перед
-запуском Windows этот вывод нужно будет отключить.
+- [imbushuo/NintendoSwitchPkg](https://github.com/imbushuo/NintendoSwitchPkg) and
+  [EDK2](https://github.com/tianocore/edk2): the UEFI this is built on.
+- [CTCaer/hekate](https://github.com/CTCaer/hekate): bootloader, L4T loader, SDMMC and BPMP know-how.
+- Switchroot / L4T: BL31 and the Mariko BPMP firmware flow.
+- [steck0714/winx](https://github.com/steck0714/winx): a parallel effort with Windows 11 ARM64 drivers.
 
-## Состояние на 2026-11-09
+## License
 
-Проверено на консоли: Windows 10 IoT Core (14393, ARM32) доходит до главного экрана, работают карта памяти, вентилятор (постоянные 50%) и сенсорный экран. Температура, батарея, USB и сеть не поддержаны: без присмотра систему надолго не оставлять.
-
-Отладка без UART: служба `swagent` при старте запускает `D:\agent\run.cmd` с FAT-раздела CRASHDUMP и пишет журнал в `D:\agent\log.txt`. Сценарий можно менять с Mac без пароля. Драйверы собираются в Docker (`drivers/`), нужен распакованный Enterprise WDK 14393. Подпись должна быть SHA-256.
-
-Файлы Microsoft и WDK, а также собранные с ними драйверы не распространять.
-
-## Состояние на 2026-11-10: Windows 10 ARM32 (15035) доходит до рабочего стола
-
-Проверено на консоли: настольная Windows 10 build 15035 (ARM32) загружается, проходит установку и входит под пользователем Switch с автовходом. Сенсор работает (как мышь: касание = клик).
-
-Как собрать и записать (карта в режиме `boot_mode.py desktop`, в активной папке EFI набор 15035, BCD из `desktop/make_bcd.sh`):
-
-1. `desktop/build_w32.sh архив_15035.7z папка` в контейнере `switch-wp-drivers` (`--device /dev/fuse --cap-add SYS_ADMIN`). Собирает образ раздела из install.wim и накладывает правки: драйвер сенсора, службу `swagent`, `unattend.xml`, пропуск шага BCD. Вместо `oobe\windeploy.exe` запускается `swagent\setup.cmd`, который копирует журналы установки в `D:\agent\panther`.
-2. `sudo python3 -I desktop/write_desktop.py disk4 62534975488 w32.img --data-only`.
-3. Первый запуск заканчивается ошибкой «could not update the computer's boot configuration»: у Switch нет переменных UEFI, и Windows не находит хранилище BCD. Этап specialize к этому моменту уже пройден, поэтому нужно поставить `HKLM\SYSTEM\Setup\Status\ChildCompletion\setup.exe = 3` (`pull_win.py` → `hive_recover.py` → `finish_setup.sh` → `push_win.py`). После этого установка переходит к OOBE.
-4. Пользователя Switch и автовход создаёт `D:\agent\w32.cmd` (копия в `desktop/w32.cmd`): его запускает служба, а файл ответов этого не сделал. Этот же сценарий заново привязывает ACPI\SWTS0001 к swhid: шаг PnP в specialize стирает привязку (`Service`, `ConfigFlags=0x40`).
-
-Чего нельзя делать:
-- Полностью отключать установку (`bypass_setup.sh`): база пользователей SAM в образе пустая, и lsass.exe падает (CRITICAL_PROCESS_DIED).
-- Выключать кнопкой во время записи. Если такое случилось, кусты реестра остаются недописанными, и перед правкой их нужно восстановить через `hive_recover.py`.
-
-Батарея и температура (`drivers/swbatt`): драйвер класса батарей читает по I2C1 MAX17050 (0x36), BQ24193 (0x6B) и TMP451 (0x4C), управляет вентилятором (50% до 50 °C, 100% к 70 °C) и выключает систему, если процессор три опроса подряд горячее 88 °C. Устройство ROOT\SWBATT создаёт `w32.cmd`. Он же обновляет драйвер: новую версию надо положить на CRASHDUMP как `agent\swbatt.sys`. Журнал пишется в `C:\swagent\bat.txt`. В настольной Windows CRASHDUMP получает букву G:, а D: — это раздел данных IoT.
-
-Падение через 10–20 минут простоя (CRITICAL_PROCESS_DIED, дамп застревает на 0%) вызывало отключение диска по таймеру питания: SD-карта после этого не просыпается. Лечится через `powercfg disk-timeout-ac/dc 0` и `IdleInWorkingState=0` для SD-контроллера. После этого система проработала 30 минут без сбоев.
-
-## Состояние на 2026-11-11: всё рабочее, разгон
-
-Пункт Hekate «Windows 10 ARM32» (`bootloader/ini/wp.ini`, иконка `bootloader/res/Windows 10 ARM32.bmp` из `desktop/make_icon.py`). Загрузчик `uefi/out/bl33-arm-cpu-b.bin`.
-
-- **Ранние зависания UEFI после метки 6** вызывала калибровка памяти прошивкой BPMP на Mariko: она шла одновременно с запуском UEFI. Лечится паузой 3 с в прокладке (`shim/build.py --delay-ms 3000`).
-- **Память 408 МГц**: `patches/*ram408.patch`, последовательность IRB из Hekate, только Mariko.
-- **Процессор 1420,8 МГц при 1000 мВ**: `patches/*cpu1428.patch`. MAX77812 M4 по I2C5 (адрес 0x31 или 0x33 определяется опросом). На время перестройки PLLX процессор переводится на clk_m через CCLKG_BURST_POLICY (0x368, только поле RUN). Переключение на PLLP вешает процессор.
-- **Патчи `*-a64only.patch`** применяются только к 64-битной сборке: таймер 0 ломает 32-битный UEFI. UEFI каждый раз собирается с нуля.
-- **«Пуск» и автозапуск** не работали из-за испорченного профиля Switch (выключение во время первого входа). Помог новый пользователь Player с автовходом (`w32.cmd`).
-- **Чистый экран (`CLEAN`)** пока не работает: «чёрный» вывод ускоряет загрузку. Нужно перепроверить с паузой.
-- **Итог на конец 2026-11-11**: загрузчик `uefi/out/bl33-arm-cpu1785-emc1600.bin` (`uefi/build_bl33.sh`). Процессор 1785,6 МГц при 1120 мВ (максимум HOS); память ~1600 МГц: её по MRQ_CLK переключает сама прошивка BPMP (`patches/*bpmp.patch`, канал 4, опрос без прерываний). Трюк IRB 408 МГц вместе с BPMP не применять. Вентилятор: рост с 45 °C, 100% к 65 °C, аварийное выключение при 85 °C. В покое 34 °C.
+Our code (shim, drivers, scripts, patches) is GPL-2.0, see `LICENSE`. The patches apply to
+NintendoSwitchPkg and EDK2, which keep their own licenses. Microsoft files (Windows images, boot
+managers, BCD), drivers built with the WDK, the test-signing private key and UEFI build outputs are
+not distributed here.

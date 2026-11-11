@@ -1,7 +1,7 @@
 #!/bin/bash
-# Внутри контейнера (--device /dev/fuse --cap-add SYS_ADMIN). Убирает из этапа специализации
-# шаг Sysprep_Specialize_Bcd: он не может открыть хранилище настроек загрузки без
-# постоянных переменных UEFI, а настройки загрузки мы готовим сами.   skip_bcd_step.sh w32.img
+# Runs inside a container (--device /dev/fuse --cap-add SYS_ADMIN). Removes the
+# Sysprep_Specialize_Bcd step from the specialize pass: it cannot open the BCD store without
+# persistent UEFI variables, and we prepare the boot configuration ourselves.   skip_bcd_step.sh w32.img
 set -euo pipefail
 IMAGE="$1"
 TMP="$(mktemp -d)"; MNT="$TMP/mnt"; mkdir "$MNT"
@@ -15,7 +15,7 @@ text = open(path, encoding="utf-8", newline="").read()
 pattern = r'<imaging exclude="">(?:(?!</imaging>).)*?Sysprep_Specialize_Bcd.*?</imaging>'
 new, count = re.subn(pattern, "", text, flags=re.S)
 if count != 1:
-    raise SystemExit(f"Ожидался один шаг SpBcd, найдено {count}")
+    raise SystemExit(f"Expected one SpBcd step, found {count}")
 open(path, "w", encoding="utf-8", newline="").write(new)
 print("removed SpBcd step")
 PY

@@ -1,7 +1,7 @@
 #!/bin/bash
-# Собирает 32-битный UEFI с нуля и упаковывает его в bl33 с прокладкой.
-# Если сборка UEFI не удалась или файл не обновился, bl33 не создаётся.
-#   ./uefi/build_bl33.sh выход.bin          (ARCH=AARCH64 — 64-битный UEFI, CLEAN=1 — чистый экран)
+# Builds the UEFI from scratch and packs it into bl33 together with the shim.
+# If the UEFI build fails or the file was not updated, no bl33 is produced.
+#   ./uefi/build_bl33.sh output.bin          (ARCH=AARCH64: 64-bit UEFI, CLEAN=1: clean screen)
 set -euo pipefail
 OUT="$1"
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,8 +15,8 @@ trap 'rm -f "$STAMP" "$LOG"' EXIT
 sleep 1
 if ! (cd "$PROJECT/uefi" && ARCH="$ARCH" ./build.sh > "$LOG" 2>&1); then
     grep -E "error|failed" "$LOG" | head -20
-    echo "ОШИБКА: UEFI не собрался, bl33 не создан"
+    echo "ERROR: UEFI did not build, no bl33 produced"
     exit 1
 fi
-[ "$FD" -nt "$STAMP" ] || { echo "ОШИБКА: $FD не обновился, bl33 не создан"; exit 1; }
+[ "$FD" -nt "$STAMP" ] || { echo "ERROR: $FD was not updated, no bl33 produced"; exit 1; }
 python3 "$PROJECT/shim/build.py" "$MODE" "$FD" --clean --delay-ms 3000 -o "$OUT"

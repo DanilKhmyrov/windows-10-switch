@@ -1,8 +1,8 @@
-// Сенсорный экран Switch для Windows: минидрайвер HID, сенсорный экран (digitizer)
-// до MAX_CONTACTS касаний. Windows сама поворачивает касания вместе с ориентацией экрана.
-// Панель FTS4 отдаёт очередь событий (READ_ALL_EVENT), у каждого номер пальца в старших
-// 4 битах первого байта.
-// Читает сенсор опросом и работает только с шиной I2C3, адрес 0x49.
+// Switch touch screen for Windows: a HID minidriver exposing a touch screen digitizer
+// with up to MAX_CONTACTS contacts. Windows rotates the contacts with the screen orientation itself.
+// The FTS4 panel returns an event queue (READ_ALL_EVENT); each event carries the finger ID in the
+// upper 4 bits of its first byte.
+// Reads the panel by polling and only talks to I2C3, address 0x49.
 #define TOUCHREAD_CORE_ONLY
 #include "../touchread/touchread.c"
 #include <hidport.h>
@@ -22,11 +22,11 @@
 #define RAW_LONG_MAX    1280
 #define RAW_SHORT_MAX   720
 #define POLL_MS         10
-#define TIP_CONFIDENCE  3           // Tip Switch и Confidence
+#define TIP_CONFIDENCE  3           // Tip Switch and Confidence
 
-// Сенсорный экран Windows 8+: MAX_CONTACTS пальцев (Tip, Confidence, Contact ID, X, Y),
-// число касаний во входном отчёте и Contact Count Maximum в отчёте-характеристике.
-// Физический размер экрана Switch: 77 × 137 мм (единицы 0,1 мм).
+// Windows 8+ touch screen: MAX_CONTACTS fingers (Tip, Confidence, Contact ID, X, Y),
+// contact count in the input report and Contact Count Maximum in the feature report.
+// Physical size of the Switch screen: 77 x 137 mm (units of 0.1 mm).
 #define FINGER_COLLECTION \
     0x05, 0x0D, 0x09, 0x22, 0xA1, 0x02, \
     0x09, 0x42, 0x09, 0x47, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x02, 0x81, 0x02, \
@@ -93,7 +93,7 @@ static PIRP PopRead(VOID)
             irp = candidate;
             break;
         }
-        InitializeListHead(entry);  // отмена уже идёт, её завершит CancelRead
+        InitializeListHead(entry);  // cancellation is in progress, CancelRead will complete it
     }
     KeReleaseSpinLock(&g_lock, irql);
     return irp;
@@ -117,7 +117,7 @@ static VOID FlushReports(VOID)
 }
 
 typedef struct _CONTACT {
-    UCHAR state;            // 0 — нет, 1 — палец на экране, 2 — только что отпущен
+    UCHAR state;            // 0: none, 1: finger down, 2: just released
     ULONG x;
     ULONG y;
 } CONTACT;
@@ -148,8 +148,8 @@ static VOID UpdateContact(const UCHAR *event)
     g_contacts[slot].y = (RAW_LONG_MAX - 1 - rawLong) * AXIS_MAX / (RAW_LONG_MAX - 1);
 }
 
-// Собирает отчёт из всех пальцев на экране и только что отпущенных (их — один раз с Tip = 0).
-// Пока хоть один палец на экране, отчёт повторяется на каждом опросе (~100 Гц).
+// Builds a report from all fingers on the screen and the ones just released (sent once with Tip = 0).
+// While at least one finger is down, the report is repeated on every poll (~100 Hz).
 static VOID BuildReport(VOID)
 {
     ULONG count = 0;

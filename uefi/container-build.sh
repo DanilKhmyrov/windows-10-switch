@@ -1,9 +1,9 @@
 #!/bin/bash
-# Выполняется внутри контейнера. Исходники лежат в томе /work,
-# готовый файл появляется в /project/uefi/out.
+# Runs inside the container. Sources live in the /work volume,
+# the result appears in /project/uefi/out.
 set -euo pipefail
 
-# Релиз EDK2, близкий к последнему коммиту NintendoSwitchPkg (март 2021).
+# EDK2 release close to the last NintendoSwitchPkg commit (March 2021).
 EDK2_COMMIT="${EDK2_COMMIT:-edk2-stable202102}"
 PKG_REPO="https://github.com/imbushuo/NintendoSwitchPkg.git"
 
@@ -15,17 +15,17 @@ if [ ! -d edk2/.git ]; then
     git -C edk2 checkout -q FETCH_HEAD
 fi
 cd edk2
-# cmocka нужен только для unit-тестов EDK2, и его сервер не отдаёт нужный коммит.
+# cmocka is only needed for EDK2 unit tests, and its server does not serve the required commit.
 git submodule status | awk '{print $2}' | grep -v cmocka \
     | xargs git submodule update --init --depth 1
 
 rm -rf NintendoSwitchPkg
 git clone -q --depth 1 "$PKG_REPO" NintendoSwitchPkg
-# Патчи *-a64only.patch нужны только 64-битной сборке: в 32-битной они ломают раннюю загрузку
-# (частота таймера 0 → UEFI висит после метки 6).
+# *-a64only.patch patches are for the 64-bit build only: in the 32-bit one they break early boot
+# (timer frequency 0 -> UEFI hangs after mark 6).
 for patch in /project/patches/*.patch; do
     case "$patch" in *-a64only.patch) [ "${ARCH:-AARCH64}" = ARM ] && continue;; esac
-    # *-cleanonly.patch — только для CLEAN=1: вывод на экран чёрным (#define CLEAN_BOOT в файлах).
+    # *-cleanonly.patch: only for CLEAN=1: screen output in black (#define CLEAN_BOOT in the files).
     case "$patch" in *-cleanonly.patch) [ "${CLEAN:-0}" = 1 ] || continue;; esac
     git -C NintendoSwitchPkg apply "$patch"
 done
@@ -41,7 +41,7 @@ cat > NintendoSwitchPkg/Include/FwReleaseInfo.h <<EOF
 #endif
 EOF
 
-# ARCH=ARM собирает 32-битную версию, ARCH=AARCH64 (по умолчанию) — 64-битную.
+# ARCH=ARM builds the 32-bit version, ARCH=AARCH64 (default) the 64-bit one.
 ARCH="${ARCH:-AARCH64}"
 export WORKSPACE="$PWD" PYTHON_COMMAND=python3 GCC5_AARCH64_PREFIX=aarch64-linux-gnu- GCC5_ARM_PREFIX=arm-linux-gnueabihf-
 make -C BaseTools -j"$(nproc)" >/work/basetools.log 2>&1 || { tail -40 /work/basetools.log; exit 1; }
@@ -49,14 +49,14 @@ make -C BaseTools -j"$(nproc)" >/work/basetools.log 2>&1 || { tail -40 /work/bas
 set +u
 . ./edksetup.sh BaseTools
 set -u
-# TARGET=RELEASE — без отладочного вывода на экран (чистая загрузка).
+# TARGET=RELEASE: no debug output on screen (clean boot).
 TARGET="${TARGET:-DEBUG}"
-# Сборка всегда с нуля: EDK2 не пересобирает модули, если поменялись только флаги
-# (-D CLEAN_BOOT), и варианты смешиваются.
+# Always a clean build: EDK2 does not rebuild modules when only flags change
+# (-D CLEAN_BOOT), and variants get mixed.
 rm -rf Build/NintendoSwitch-ARM Build/NintendoSwitch-AARCH64
 
-# CLEAN=1 включает патч *-cleanonly.patch (см. выше): флаги сборки при этом те же,
-# что и у обычной отладочной версии (флаг -D CLEAN_BOOT через DSC ломал раннюю загрузку).
+# CLEAN=1 enables the *-cleanonly.patch patch (see above): the build flags stay the same
+# as for the normal debug build (a -D CLEAN_BOOT flag via the DSC broke early boot).
 build -n "$(nproc)" -a "$ARCH" -b "$TARGET" -t GCC5 -p NintendoSwitchPkg/NintendoSwitch.dsc
 
 mkdir -p /project/uefi/out

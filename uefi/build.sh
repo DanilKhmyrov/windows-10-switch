@@ -1,5 +1,5 @@
 #!/bin/bash
-# Собирает UEFI в Docker. Результат: uefi/out/NintendoSwitch.fd
+# Builds UEFI in Docker. Output: uefi/out/NintendoSwitch.fd
 set -euo pipefail
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
 

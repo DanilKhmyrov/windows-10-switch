@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Обновляет образ раздела по карте: читает раздел целиком и записывает в образ только
-те МиБ, у которых сумма отличается от сохранённой. Карту только читает.
-После этого суммы образа совпадают с картой, и img_sums.py push запишет обратно лишь
-то, что было изменено в образе.
+"""Updates a partition image from the card: reads the whole partition and writes into the image only
+the MiB whose checksum differs from the saved one. Only reads the card.
+Afterwards the image checksums match the card, and img_sums.py push writes back only
+what was changed in the image.
 
-    sudo python3 -I sync_from_card.py disk4 62534975488 образ.img суммы.txt НАЧАЛО_МиБ
+    sudo python3 -I sync_from_card.py disk4 62534975488 image.img sums.txt START_MiB
 """
 import hashlib
 import os
@@ -19,11 +19,11 @@ def main():
     start = int(start_mib) * MIB
     text = subprocess.run(["diskutil", "info", disk], check=True, capture_output=True, text=True).stdout
     if "SD RAW" not in text or f"({expected} Bytes)" not in text:
-        raise SystemExit("Это не та карта")
+        raise SystemExit("Wrong card")
     old = open(sums).read().split()
     size = os.path.getsize(image)
     if len(old) != size // MIB or start + size > int(expected):
-        raise SystemExit("Суммы или размер не сходятся")
+        raise SystemExit("Checksums or size do not match")
     subprocess.run(["diskutil", "unmountDisk", f"/dev/{disk}"], check=True)
     src = os.open(f"/dev/r{disk}", os.O_RDONLY)
     dst = os.open(image, os.O_RDWR)
@@ -33,14 +33,14 @@ def main():
     for i in range(total):
         block = os.pread(src, MIB, start + i * MIB)
         if len(block) != MIB:
-            raise SystemExit(f"ОШИБКА: короткое чтение на МиБ {i}")
+            raise SystemExit(f"ERROR: short read at MiB {i}")
         digest = hashlib.sha1(block).hexdigest()
         if digest != old[i]:
             os.pwrite(dst, block, i * MIB)
             changed += 1
         new.append(digest)
         if i % 2048 == 0:
-            print(f"  {i // 1024} из {total // 1024} ГиБ, изменено МиБ: {changed}", flush=True)
+            print(f"  {i // 1024} of {total // 1024} GiB, changed MiB: {changed}", flush=True)
     os.fsync(dst)
     os.close(dst)
     os.close(src)
@@ -50,7 +50,7 @@ def main():
     owner = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
     if all(owner):
         os.chown(sums, int(owner[0]), int(owner[1]))
-    print(f"ГОТОВО: изменено МиБ: {changed}, суммы обновлены")
+    print(f"DONE: changed MiB: {changed}, checksums updated")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Собирает bl33.bin. Нужен только clang, который уже есть на macOS.
+"""Builds bl33.bin. Needs only clang, which macOS already has.
 
-    python3 build.py test                  # bl33 для проверки цветом
-    python3 build.py chain NintendoSwitch.fd  # bl33 с 64-битным UEFI внутри
-    python3 build.py chain32 NintendoSwitch-arm.fd  # bl33 с 32-битным UEFI внутри
-    python3 build.py chain32 NintendoSwitch-arm-release.fd --clean  # чистая загрузка
+    python3 build.py test                  # bl33 for a colour test
+    python3 build.py chain NintendoSwitch.fd  # bl33 with the 64-bit UEFI inside
+    python3 build.py chain32 NintendoSwitch-arm.fd  # bl33 with the 32-bit UEFI inside
+    python3 build.py chain32 NintendoSwitch-arm-release.fd --clean  # clean boot screen
 """
 import argparse
 import struct
@@ -14,15 +14,15 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-UEFI_MAX_SIZE = 0xE0000  # размер области UEFI в NintendoSwitch.fdf
+UEFI_MAX_SIZE = 0xE0000  # size of the UEFI region in NintendoSwitch.fdf
 SHT_RELA, SHT_REL = 4, 9
 
 
 def extract_text(obj: Path) -> bytes:
-    """Достаёт код из ELF-файла и проверяет, что он не требует линковки."""
+    """Extracts the code from an ELF file and checks that it needs no linking."""
     data = obj.read_bytes()
     if data[:4] != b"\x7fELF":
-        raise SystemExit(f"{obj}: это не ELF")
+        raise SystemExit(f"{obj}: not an ELF file")
     is_64 = data[4] == 2
     if is_64:
         shoff = struct.unpack_from("<Q", data, 0x28)[0]
@@ -51,7 +51,7 @@ def extract_text(obj: Path) -> bytes:
     named = {section_name(s): s for s in sections}
     for bad in (s for s in sections if s[1] in (SHT_RELA, SHT_REL)):
         if section_name(bad) in (".rela.text", ".rel.text") and bad[3]:
-            raise SystemExit("В коде остались ссылки, которым нужен линковщик")
+            raise SystemExit("The code still has references that need a linker")
     _, _, offset, size = named[".text"]
     return data[offset:offset + size]
 
@@ -83,12 +83,12 @@ def build(mode: str, payload: bytes, output: Path, clean: bool = False, delay_ms
         )
 
     if shim[8:16] != b"WPSHIM01":
-        raise SystemExit("Заголовок прокладки собран неверно")
+        raise SystemExit("The shim header was assembled incorrectly")
     while len(shim) % 8:
         shim.append(0)
     struct.pack_into("<Q", shim, 0x18, len(payload))
     output.write_bytes(bytes(shim) + payload)
-    print(f"{output}: {len(shim)} байт прокладки + {len(payload)} байт UEFI")
+    print(f"{output}: {len(shim)} bytes of shim + {len(payload)} bytes of UEFI")
 
 
 def main() -> None:
@@ -97,18 +97,18 @@ def main() -> None:
     parser.add_argument("uefi", nargs="?", type=Path, help="NintendoSwitch.fd")
     parser.add_argument("-o", "--output", type=Path, default=HERE / "bl33.bin")
     parser.add_argument("--delay-ms", type=int, default=0,
-                        help="пауза перед запуском UEFI (ожидание калибровки памяти на Mariko)")
+                        help="delay before starting UEFI (waits for memory training on Mariko)")
     parser.add_argument("--clean", action="store_true",
-                        help="без цветных отметок: только чёрный экран (ошибки остаются цветными)")
+                        help="no colour marks: just a black screen (errors stay coloured)")
     args = parser.parse_args()
 
     payload = b""
     if args.mode in ("chain", "chain32"):
         if not args.uefi:
-            sys.exit("Для этого режима укажи файл UEFI (.fd)")
+            sys.exit("This mode needs a UEFI file (.fd)")
         payload = args.uefi.read_bytes()
         if not payload or len(payload) > UEFI_MAX_SIZE:
-            sys.exit(f"Неверный размер UEFI: {len(payload)} байт")
+            sys.exit(f"Wrong UEFI size: {len(payload)} bytes")
     build(args.mode, payload, args.output, args.clean, args.delay_ms)
 
 

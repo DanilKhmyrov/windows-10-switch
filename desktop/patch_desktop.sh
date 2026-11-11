@@ -1,6 +1,6 @@
 #!/bin/bash
-# Внутри контейнера (--device /dev/fuse --cap-add SYS_ADMIN). Готовит Windows 10 ARM32 к запуску:
-# автоответы, служба диагностики, синий экран, драйвер сенсора.   patch_desktop.sh w32.img
+# Runs inside a container (--device /dev/fuse --cap-add SYS_ADMIN). Prepares Windows 10 ARM32 to boot:
+# answer file, diagnostics service, blue screen settings, touch driver.   patch_desktop.sh w32.img
 set -euo pipefail
 IMAGE="$1"; HERE="$(dirname "$0")"
 TMP="$(mktemp -d)"; MNT="$TMP/mnt"; mkdir "$MNT"

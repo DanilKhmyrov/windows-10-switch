@@ -1,9 +1,9 @@
 #!/bin/bash
-# Внутри контейнера (--device /dev/fuse --cap-add SYS_ADMIN). После ошибки «could not update
-# the computer's boot configuration» отмечает этап specialize как завершённый
-# (Setup\Status\ChildCompletion\setup.exe = 3), чтобы установка перешла к OOBE.
-# Кусты SYSTEM и SECURITY берутся уже восстановленные hive_recover.py (*.rec).
-#   finish_setup.sh win.img папка_с_кустами
+# Runs inside a container (--device /dev/fuse --cap-add SYS_ADMIN). After the error "could not update
+# the computer's boot configuration" marks the specialize pass as complete
+# (Setup\Status\ChildCompletion\setup.exe = 3), so that setup moves on to OOBE.
+# The SYSTEM and SECURITY hives must already be recovered by hive_recover.py (*.rec).
+#   finish_setup.sh win.img hive_folder
 set -euo pipefail
 IMAGE="$1"; HIVES="$2"
 TMP="$(mktemp -d)"; MNT="$TMP/mnt"; mkdir "$MNT"

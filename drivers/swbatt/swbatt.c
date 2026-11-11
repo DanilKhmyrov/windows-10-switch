@@ -1,19 +1,19 @@
-// Батарея и температура Switch для Windows: минидрайвер класса батарей (battc.sys)
-// и управление вентилятором.
+// Switch battery and temperature for Windows: a battery class miniport (battc.sys)
+// plus fan control.
 //
-// Раз в POLL_MS читает по шине I2C1:
-//   MAX17050 (0x36) — датчик заряда: проценты, ёмкость, напряжение, ток, температура батареи;
-//   BQ24193  (0x6B) — контроллер зарядки: подключено ли питание, идёт ли заряд;
-//   TMP451   (0x4C) — температура процессора и платы.
-// Windows получает обычную батарею: значок с процентами, «заряжается», оставшееся время,
-// а при BATTERY_CRITICAL сама выключается (действие задаёт powercfg в w32.cmd).
-// Вентилятор: 50% до FAN_LOW_C (45 °C), дальше линейно до 100% к FAN_HIGH_C (65 °C); при ошибках
-// чтения температуры — 100%. При SHUTDOWN_C и выше — аварийное выключение системы.
-// Шину I2C1 настраивает UEFI (PmicDxe), другие драйверы Windows её не используют.
+// Every POLL_MS it reads over I2C1:
+//   MAX17050 (0x36): fuel gauge: percent, capacity, voltage, current, battery temperature;
+//   BQ24193  (0x6B): charger: whether external power is present and charging is on;
+//   TMP451   (0x4C): SoC and board temperature.
+// Windows sees a regular battery: tray icon with percent, "charging", remaining time,
+// and shuts itself down at BATTERY_CRITICAL (the action is set by powercfg in w32.cmd).
+// Fan: 50% up to FAN_LOW_C (45 C), then linear to 100% at FAN_HIGH_C (65 C); 100% if the
+// temperature cannot be read. At SHUTDOWN_C and above the system is shut down.
+// I2C1 is set up by UEFI (PmicDxe); no other Windows driver uses it.
 #include <ntddk.h>
 #include <batclass.h>
 
-// Есть в ntoskrnl.lib, но не объявлена в заголовках WDK.
+// Exported by ntoskrnl.lib but not declared in the WDK headers.
 NTSYSAPI NTSTATUS NTAPI ZwInitiatePowerAction(POWER_ACTION SystemAction,
     SYSTEM_POWER_STATE LightestSystemState, ULONG Flags, BOOLEAN Asynchronous);
 #ifndef POWER_ACTION_OVERRIDE_APPS
@@ -50,15 +50,15 @@ NTSYSAPI NTSTATUS NTAPI ZwInitiatePowerAction(POWER_ACTION SystemAction,
 #define T_REMOTE_FRAC   0x10
 
 #define POLL_MS         5000
-#define LOG_EVERY       12          // раз в минуту
-#define DESIGN_MWH      16400       // 4310 мА·ч × 3,8 В
+#define LOG_EVERY       12          // once a minute
+#define DESIGN_MWH      16400       // 4310 mAh x 3.8 V
 #define CRITICAL_PCT    3
 #define FAN_MIN_PCT     50
 #define FAN_LOW_C       45
 #define FAN_HIGH_C      65
 #define SHUTDOWN_C      85
 #define READ_FAIL_FAN   3
-#define HOT_READINGS    3           // столько опросов подряд выше SHUTDOWN_C
+#define HOT_READINGS    3           // this many polls in a row above SHUTDOWN_C
 #define PLAUSIBLE_MAX_C 125
 
 #define R_CNFG          (0x00 / 4)
@@ -95,13 +95,13 @@ typedef struct _SNAPSHOT {
     BOOLEAN valid;
     BOOLEAN online;
     BOOLEAN charging;
-    ULONG percent100;       // проценты × 100
+    ULONG percent100;       // percent x 100
     ULONG fullMwh;
     ULONG millivolts;
-    LONG milliamps;         // < 0 — разряд
-    LONG batteryDeciC;      // температура батареи, десятые °C
+    LONG milliamps;         // < 0: discharging
+    LONG batteryDeciC;      // battery temperature, tenths of C
     ULONG tteSeconds;
-    LONG socDeciC;          // процессор, десятые °C
+    LONG socDeciC;          // SoC, tenths of C
     LONG pcbC;
     ULONG fanPct;
     UCHAR chargerStatus;
@@ -125,7 +125,7 @@ static PDEVICE_EXTENSION g_ext;
 static CHAR g_log[LOG_SIZE];
 static ULONG g_len;
 
-// ---- I2C1, обычный режим: до 4 байт за транзакцию ----------------------------------
+// ---- I2C1, normal mode: up to 4 bytes per transaction ----------------------------------
 
 static VOID LoadConfig(VOID)
 {
@@ -171,7 +171,7 @@ static BOOLEAN Gauge(UCHAR reg, ULONG *value)
     return TRUE;
 }
 
-// Деление на переменную без библиотечного помощника ядра (он требует GS-cookie).
+// Division by a variable without the kernel library helper (it needs a GS cookie).
 static ULONG UDiv(ULONG n, ULONG d)
 {
     ULONG q = 0;
@@ -187,7 +187,7 @@ static ULONG UDiv(ULONG n, ULONG d)
     return q;
 }
 
-// ---- Журнал в C:\swagent\bat.txt (последние записи, старые отбрасываются) ----------------------------------------------------
+// ---- Log in C:\swagent\bat.txt (latest entries, older ones are dropped) ----------------------------------------------------
 
 static VOID LogText(const CHAR *text)
 {
@@ -240,13 +240,13 @@ static VOID SaveLog(VOID)
     }
 }
 
-// ---- Вентилятор --------------------------------------------------------------------
+// ---- Fan ---------------------------------------------------------------------------
 
 static VOID SetFan(ULONG percent)
 {
     ULONG duty = percent * FAN_DUTY_MAX / 100;
 
-    // Полярность ШИМ обратная, как в UEFI (FanStart).
+    // PWM polarity is inverted, as in UEFI (FanStart).
     g_pwm[PWM_FAN_CSR] = PWM_ENABLE | ((FAN_DUTY_MAX - duty) << 16);
 }
 
@@ -259,7 +259,7 @@ static ULONG FanForTemp(LONG socC)
     return FAN_MIN_PCT + (ULONG) (socC - FAN_LOW_C) * (100 - FAN_MIN_PCT) / (FAN_HIGH_C - FAN_LOW_C);
 }
 
-// ---- Опрос -------------------------------------------------------------------------
+// ---- Polling -----------------------------------------------------------------------
 
 static BOOLEAN ReadSnapshot(SNAPSHOT *s, ULONG raw[8])
 {
@@ -288,16 +288,16 @@ static BOOLEAN ReadSnapshot(SNAPSHOT *s, ULONG raw[8])
     s->percent100 = soc * 100 / 256;
     if (s->percent100 > 10000)
         s->percent100 = 10000;
-    s->millivolts = vcell * 5 / 64;                                // 0,078125 мВ на единицу
-    s->milliamps = (LONG) (SHORT) current * 5 / 32;               // 1,5625 мкВ / 10 мОм (сверено по скорости разряда)
+    s->millivolts = vcell * 5 / 64;                                // 0.078125 mV per unit
+    s->milliamps = (LONG) (SHORT) current * 5 / 32;               // 1.5625 uV / 10 mOhm (checked against the discharge rate)
     s->batteryDeciC = (LONG) (SHORT) temp * 10 / 256;
-    s->tteSeconds = tte * 45 / 8;                                  // 5,625 с на единицу
+    s->tteSeconds = tte * 45 / 8;                                  // 5.625 s per unit
     s->fullMwh = DESIGN_MWH;
     if (design != 0 && fullcap != 0 && fullcap < design)
         s->fullMwh = UDiv(DESIGN_MWH * fullcap, design);
     if (chargerOk) {
         s->chargerStatus = (UCHAR) chg;
-        s->online = (chg & (1 << 2)) != 0 && ((chg >> 6) & 3) != 3;   // PG_STAT, не режим OTG
+        s->online = (chg & (1 << 2)) != 0 && ((chg >> 6) & 3) != 3;   // PG_STAT, not OTG mode
         s->charging = s->online && ((chg >> 4) & 3) != 0 && ((chg >> 4) & 3) != 3;
     } else {
         s->online = s->milliamps > 0;
@@ -308,12 +308,12 @@ static BOOLEAN ReadSnapshot(SNAPSHOT *s, ULONG raw[8])
 
 static VOID Shutdown(VOID)
 {
-    // Порядок как у критического разряда батареи: Windows закрывает всё и выключается.
+    // Same as a critical battery: Windows closes everything and shuts down.
     (VOID) ZwInitiatePowerAction(PowerActionShutdownOff, PowerSystemShutdown,
         POWER_ACTION_CRITICAL | POWER_ACTION_OVERRIDE_APPS, TRUE);
 }
 
-// Только чтение регистров тактирования: чтобы понять текущие частоты процессора и памяти.
+// Read-only access to the clock registers, to log the current CPU and memory clocks.
 static VOID LogClocks(VOID)
 {
     static const USHORT regs[] = { 0x020, 0x024, 0x0E0, 0x0E4, 0x0E8, 0x090, 0x094, 0x5E8, 0x19C, 0x370, 0x374 };
@@ -335,11 +335,11 @@ static VOID LogClocks(VOID)
     address.QuadPart = 0x70000000ULL;
     car = MmMapIoSpace(address, 0x1000, MmNonCached);
     if (car != NULL) {
-        LogText(" hidrev=");                    // биты 7:4: 1 — T210 (Erista), 2 — T210B01 (Mariko)
+        LogText(" hidrev=");                    // bits 7:4: 1 = T210 (Erista), 2 = T210B01 (Mariko)
         LogNum((LONG) car[0x804 / 4]);
         MmUnmapIoSpace((PVOID) car, 0x1000);
     }
-    // Напряжение процессора: регулятор MAX77812 (I2C5, 0x31 или 0x33), регистр M4_VOUT, только чтение.
+    // CPU voltage: MAX77812 regulator (I2C5, 0x31 or 0x33), register M4_VOUT, read only.
     address.QuadPart = 0x7000D000ULL;
     car = MmMapIoSpace(address, I2C_SIZE, MmNonCached);
     if (car != NULL && g_i2c != NULL) {
@@ -446,7 +446,7 @@ VOID PollThread(PVOID context)
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
-// ---- Класс батарей -----------------------------------------------------------------
+// ---- Battery class -----------------------------------------------------------------
 
 static NTSTATUS QueryTag(PVOID context, PULONG tag)
 {
@@ -495,7 +495,7 @@ static NTSTATUS QueryInformation(PVOID context, ULONG tag, BATTERY_QUERY_INFORMA
         info.CycleCount = 0;
         return ReturnBuffer(buffer, length, returned, &info, sizeof(info));
     case BatteryTemperature:
-        value = (ULONG) (s.batteryDeciC + 2732);    // десятые доли кельвина
+        value = (ULONG) (s.batteryDeciC + 2732);    // tenths of a kelvin
         return ReturnBuffer(buffer, length, returned, &value, sizeof(value));
     case BatteryEstimatedTime:
         value = (s.valid && !s.online && s.tteSeconds != 0 && s.tteSeconds < 0xFFFF * 6)
@@ -540,7 +540,7 @@ static NTSTATUS QueryStatus(PVOID context, ULONG tag, PBATTERY_STATUS status)
     }
     status->Capacity = s.fullMwh * s.percent100 / 10000;
     status->Voltage = s.millivolts;
-    status->Rate = s.milliamps * (LONG) s.millivolts / 1000;        // мВт, < 0 — разряд
+    status->Rate = s.milliamps * (LONG) s.millivolts / 1000;        // mW, < 0: discharging
     return STATUS_SUCCESS;
 }
 
@@ -555,7 +555,7 @@ static NTSTATUS SetInformation(PVOID context, ULONG tag, BATTERY_SET_INFORMATION
 
 static NTSTATUS SetStatusNotify(PVOID context, ULONG tag, PBATTERY_NOTIFY notify)
 {
-    // Опрос и так сообщает об изменениях раз в POLL_MS.
+    // Polling already reports changes every POLL_MS.
     UNREFERENCED_PARAMETER(context);
     UNREFERENCED_PARAMETER(notify);
     return tag == BATTERY_TAG ? STATUS_SUCCESS : STATUS_NO_SUCH_DEVICE;
@@ -567,7 +567,7 @@ static NTSTATUS DisableStatusNotify(PVOID context)
     return STATUS_SUCCESS;
 }
 
-// ---- Устройство --------------------------------------------------------------------
+// ---- Device ------------------------------------------------------------------------
 
 static NTSTATUS StartPolling(VOID)
 {

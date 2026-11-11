@@ -1,9 +1,9 @@
 #!/bin/bash
-# Внутри контейнера (--device /dev/fuse --cap-add SYS_ADMIN): возвращает образ в режим
-# программы установки, но вместо oobe\windeploy.exe запускает swagent\setup.cmd, который
-# сам вызывает windeploy и копирует журналы на CRASHDUMP. Кусты SYSTEM и SECURITY берутся
-# уже восстановленные hive_recover.py (папка с SYSTEM.rec и SECURITY.rec).
-#   setup_mode.sh win.img папка_с_кустами
+# Runs inside a container (--device /dev/fuse --cap-add SYS_ADMIN): puts the image back into
+# Windows Setup mode, but runs swagent\setup.cmd instead of oobe\windeploy.exe; it
+# calls windeploy itself and copies the logs to CRASHDUMP. The SYSTEM and SECURITY hives must
+# already be recovered by hive_recover.py (a folder with SYSTEM.rec and SECURITY.rec).
+#   setup_mode.sh win.img hive_folder
 set -euo pipefail
 IMAGE="$1"; HIVES="$2"; HERE="$(dirname "$0")"
 TMP="$(mktemp -d)"; MNT="$TMP/mnt"; mkdir "$MNT"
@@ -30,7 +30,7 @@ hivexget "$TMP/SYSTEM" '\Setup'
 for HIVE in SYSTEM SECURITY; do
     cp "$TMP/$HIVE" "$CONFIG/$HIVE"
     cmp "$TMP/$HIVE" "$CONFIG/$HIVE"
-    # Журналы уже применены: пустые журналы Windows не воспроизводит.
+    # The logs are already applied: Windows does not replay empty logs.
     : > "$CONFIG/$HIVE.LOG1"; : > "$CONFIG/$HIVE.LOG2"
 done
 cp "$HERE/setup.cmd" "$HERE/copylogs.cmd" "$MNT/swagent/"

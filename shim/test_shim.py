@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Запускает собранную прокладку в эмуляторе процессора, без консоли.
+"""Runs the built shim in a CPU emulator, without the console.
 
-Проверяет логику: цвета, вывод в UART, копирование UEFI и переход на него.
-Не проверяет настоящее железо, Hekate и BL31.
+Checks the logic: colours, UART output, copying UEFI and jumping to it.
+Does not check real hardware, Hekate or BL31.
 
     pip install unicorn
     python3 test_shim.py
@@ -30,7 +30,7 @@ CAR = 0x60006000
 UART = 0x70006040
 EL2H = 0x3C9
 PAGE = 0x1000
-CMP_X21_2 = 0xF1000ABF  # инструкция cmp x21, #2
+CMP_X21_2 = 0xF1000ABF  # instruction cmp x21, #2
 
 
 def build(mode, uefi=None):
@@ -82,8 +82,8 @@ def machine_a64(image, clk_enable=True, fake_el2=True):
     m.uc.mem_write(BL33, image)
     m.uc.reg_write(UC_ARM64_REG_PSTATE, EL2H)
     if fake_el2:
-        # Эмулятор работает только в EL1, поэтому перед проверкой уровня
-        # подставляем значение 2, которое задаёт Hekate на настоящей консоли.
+        # The emulator only runs at EL1, so before the level check
+        # we substitute 2, the value Hekate sets on the real console.
         check = BL33 + image.index(struct.pack("<I", CMP_X21_2))
         m.uc.hook_add(
             UC_HOOK_CODE,
@@ -105,8 +105,8 @@ def run(m, start, stop, count=30_000_000):
 def test_header():
     image = build("test")
     assert image[8:16] == b"WPSHIM01"
-    assert struct.unpack_from("<I", image, 0x10)[0] == 0, "+0x10 должно быть нулём"
-    print("ok: заголовок и нулевое смещение DTB")
+    assert struct.unpack_from("<I", image, 0x10)[0] == 0, "+0x10 must be zero"
+    print("ok: header and zero DTB offset")
 
 
 def test_chain():
@@ -117,14 +117,14 @@ def test_chain():
         image = build("chain", fd.name)
     m = machine_a64(image)
     error = run(m, BL33, UEFI)
-    assert error is None, f"сбой: {error}"
-    assert m.uc.reg_read(UC_ARM64_REG_PC) == UEFI, "нет перехода на UEFI"
-    assert bytes(m.uc.mem_read(UEFI, len(payload))) == payload, "UEFI скопирован неверно"
+    assert error is None, f"failure: {error}"
+    assert m.uc.reg_read(UC_ARM64_REG_PC) == UEFI, "no jump to UEFI"
+    assert bytes(m.uc.mem_read(UEFI, len(payload))) == payload, "UEFI copied incorrectly"
     assert m.colors == [0xFF00FF00, 0xFF00FFFF], m.colors
     text = m.uart.decode()
-    # В эмуляторе здесь будет CurrentEL=1: значение подменяется уже после печати.
+    # In the emulator CurrentEL=1 here: the value is substituted after printing.
     assert "CurrentEL=" in text and "jumping to UEFI" in text, text
-    print("ok: копирование UEFI, цвета, UART, переход")
+    print("ok: UEFI copy, colours, UART, jump")
     print("   UART:", text.strip().replace("\r\n", " | "))
 
 
@@ -135,9 +135,9 @@ def test_uart_disabled():
         image = build("chain", fd.name)
     m = machine_a64(image, clk_enable=False)
     error = run(m, BL33, UEFI)
-    assert error is None, f"сбой: {error}"
-    assert not m.uart_touched, "код обратился к выключенному UART"
-    print("ok: выключенный UART не трогаем")
+    assert error is None, f"failure: {error}"
+    assert not m.uart_touched, "the code touched the disabled UART"
+    print("ok: disabled UART is left alone")
 
 
 def test_wrong_el_stops():
@@ -147,9 +147,9 @@ def test_wrong_el_stops():
         image = build("chain", fd.name)
     m = machine_a64(image, fake_el2=False)
     run(m, BL33, UEFI, count=8_000_000)
-    assert m.uc.reg_read(UC_ARM64_REG_PC) != UEFI, "ушли в UEFI с неверным уровнем"
+    assert m.uc.reg_read(UC_ARM64_REG_PC) != UEFI, "went to UEFI at the wrong level"
     assert m.colors == [0xFF00FF00, 0xFFFF00FF], m.colors
-    print("ok: при неверном уровне экран маджента, запуска UEFI нет")
+    print("ok: magenta screen at the wrong level, UEFI not started")
 
 
 def test_a32_blob():
@@ -163,12 +163,12 @@ def test_a32_blob():
     m.uc.mem_map(address, 0x10000)
     m.uc.mem_write(address, code)
     m.uc.reg_write(UC_ARM_REG_R0, 1)
-    halt = address + code.index(struct.pack("<I", 0xE320F002))  # инструкция wfe
+    halt = address + code.index(struct.pack("<I", 0xE320F002))  # instruction wfe
     error = run(m, address, halt)
-    assert error is None, f"сбой: {error}"
+    assert error is None, f"failure: {error}"
     assert m.colors == [0xFFFFFFFF], m.colors
     assert "AArch32 OK" in m.uart.decode(), m.uart
-    print("ok: 32-битная часть рисует белый и пишет в UART")
+    print("ok: the 32-bit part paints white and writes to the UART")
 
 
 if __name__ == "__main__":
@@ -177,4 +177,4 @@ if __name__ == "__main__":
     test_uart_disabled()
     test_wrong_el_stops()
     test_a32_blob()
-    print("Все проверки в эмуляторе пройдены.")
+    print("All emulator checks passed.")

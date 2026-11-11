@@ -1,6 +1,6 @@
-// 32-битная часть теста. Если экран стал белым, значит процессор
-// успешно перешёл в режим, в котором работает Windows 10 Mobile.
-// r0 = 1, если UART доступен.
+// 32-bit part of the test. A white screen means the CPU
+// successfully switched to the mode Windows runs in (AArch32 EL1).
+// r0 = 1 if the UART is available.
 
     .syntax unified
     .arch armv7-a

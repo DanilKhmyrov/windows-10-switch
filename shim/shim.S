@@ -1,11 +1,11 @@
-// Прокладка bl33: первый наш код, который запускается после Hekate и BL31.
+// bl33 shim: our first code, started by Hekate after BL31.
 //
-// Hekate кладёт файл bl33.bin по адресу 0xAA000000 и передаёт сюда управление.
-// Задачи: показать цветом, что код работает, настроить UART и дальше
-//   - в режиме теста (TEST_MODE=1) перейти в 32-битный режим;
-//   - в режиме запуска (TEST_MODE=0) скопировать UEFI на его адрес и запустить.
+// Hekate loads bl33.bin at 0xAA000000 and jumps here.
+// It shows by colour that the code runs, sets up the UART and then
+//   - in test mode (TEST_MODE=1) switches to 32-bit mode;
+//   - in boot mode (TEST_MODE=0) copies UEFI to its address and starts it.
 //
-// Цвета подобраны так, чтобы не зависеть от порядка байт R и B.
+// The colours are chosen so that they do not depend on R/B byte order.
 
 #define FB_BASE     0xF5A00000
 #define FB_PIXELS   (720 * 1280)
@@ -14,7 +14,7 @@
 #define MAGENTA     0xFFFF00FF
 #define YELLOW_CYAN 0xFF00FFFF
 #define BLACK       0xFF000000
-#define TMR_US      0x60005010      // микросекундный счётчик таймера Tegra
+#define TMR_US      0x60005010      // Tegra timer microsecond counter
 #ifndef DELAY_MS
 #define DELAY_MS    0
 #endif
@@ -33,12 +33,12 @@
 #define UART_LSR    0x14
 #define UART_SPR    0x1C
 #define LSR_THRE    0x20
-// 408 МГц / (16 * 115200), как считает сам Hekate.
+// 408 MHz / (16 * 115200), computed the same way as Hekate does.
 #define UART_DIV    221
 
 #define UEFI_BASE   0x80110000
 
-// Векторы EL2 остаются внутри прокладки, UEFI резервирует эту область от Windows.
+// The EL2 vectors stay inside the shim; UEFI reserves this region from Windows.
 #define TRAP_BASE   0xAA0FF000
 #define TRAP_COUNT  (TRAP_BASE + 0xF00)
 #define TRAP_STACK  (TRAP_BASE + 0xEF0)
@@ -51,29 +51,32 @@
 #define HCR_RW      (1 << 31)
 #define HCR_AMO     (1 << 5)
 #define HCR_FMO     (1 << 3)
-#define HCR_TSC     (1 << 19)       // перехват SMC из EL1
-#define HCR_TACR    (1 << 21)       // перехват ACTLR_EL1: сигнал от UEFI
-#define SMP_TABLE   TRAP_BASE       // по 16 байт на ядро: адрес старта и context_id от Windows
+#define HCR_TSC     (1 << 19)       // trap SMC from EL1
+#define HCR_TACR    (1 << 21)       // trap ACTLR_EL1: signal from UEFI
+#define SMP_TABLE   TRAP_BASE       // 16 bytes per core: entry point and context_id from Windows
 #define PSCI_CPU_ON64 0xC4000003
 #define PSCI_CPU_ON32 0x84000003
 #define UNEXPECTED_COLOR 0xFFFF0080
-#define SHIM_MAGIC  0x5357534D      // ответ UEFI на сигнал: перехват SMC включён
-#define SMC_TRACE   (TRAP_BASE + 0xF10)  // счётчик вызовов для трассировки на экране
+#define SHIM_MAGIC  0x5357534D      // reply to the UEFI signal: SMC trapping is on
+#define SMC_TRACE   (TRAP_BASE + 0xF10)  // call counter for the on-screen trace
 #define TRACE_Y     980
 #define FIQ_COLOR   0xFF00FF00
 #define SERROR_COLOR 0xFFFF00FF
-#define SMC_LOG     (TRAP_BASE + 0x500)  // 32 записи по 8 байт: номер функции и x1
-#define MMIO_LOG    (TRAP_BASE + 0x100)  // 64 записи по 8 байт: описание обращения и значение
+#ifndef SHOW_TRACE
+#define SHOW_TRACE  0               // on-screen squares tracing firmware calls
+#endif
+#define SMC_LOG     (TRAP_BASE + 0x500)  // 32 entries of 8 bytes: function ID and x1
+#define MMIO_LOG    (TRAP_BASE + 0x100)  // 64 entries of 8 bytes: access descriptor and value
 #define MMIO_SHOW   36
 #define MMIO_COUNT  (TRAP_BASE + 0xF20)
-#define HCR_VM      (1 << 0)        // вторая ступень трансляции для EL1
-#define S2_L1       0xAA0FC000      // таблицы второй ступени (зарезервированная память)
-#define S2_L2       0xAA0FD000      // 1..2 ГБ блоками по 2 МБ
-#define S2_L3       0xAA0FE000      // 0x70000000..0x701FFFFF страницами по 4 КБ
-#define S2_BLOCK    0x7FD           // блок: Normal WB (атрибуты первой ступени главнее), RW, AF
+#define HCR_VM      (1 << 0)        // stage-2 translation for EL1
+#define S2_L1       0xAA0FC000      // stage-2 tables (reserved memory)
+#define S2_L2       0xAA0FD000      // 1..2 GB in 2 MB blocks
+#define S2_L3       0xAA0FE000      // 0x70000000..0x701FFFFF in 4 KB pages
+#define S2_BLOCK    0x7FD           // block: Normal WB (stage-1 attributes win), RW, AF
 #define S2_PAGE     0x7FF
-#define S2_TRAP_IDX 0xB0            // страница 0x700B0000 (SDMMC1..4) — перехватывается
-#define VTCR_VAL    0x8001305F      // T0SZ=31 (8 ГБ), старт с L1, 4 КБ, PS=36 бит, обход без кэша
+#define S2_TRAP_IDX 0xB0            // page 0x700B0000 (SDMMC1..4) is trapped
+#define VTCR_VAL    0x8001305F      // T0SZ=31 (8 GB), start at L1, 4 KB, PS=36 bits, non-cacheable walks
 
 .macro mov32 reg, value
     movz \reg, #((\value) & 0xFFFF)
@@ -85,27 +88,27 @@ _start:
     b       start                   // +0x00
     .word   0                       // +0x04
     .ascii  "WPSHIM01"              // +0x08
-    // +0x10: Hekate читает здесь смещение DTB. Ноль указывает на начало файла,
-    // где DTB нет, и загрузчик просто ничего не будет менять.
+    // +0x10: Hekate reads the DTB offset here. Zero points at the start of the file,
+    // where there is no DTB, so the loader changes nothing.
     .word   0                       // +0x10
     .word   0                       // +0x14
 payload_size:
-    .quad   0                       // +0x18: заполняет build.py
+    .quad   0                       // +0x18: filled in by build.py
 
 start:
     msr     daifset, #0xF
     adr     x19, _start
 
 #if CLEAN
-    mov32   w0, BLACK               // Чистая загрузка: просто убираем экран Hekate.
+    mov32   w0, BLACK               // Clean boot: just clear the Hekate screen.
 #else
     mov32   w0, GREEN
 #endif
     bl      fill_screen
 
 #if DELAY_MS
-    // Пауза перед UEFI: на Mariko прошивка BPMP после Hekate ещё калибрует память,
-    // а ранний UEFI в это время случайно зависал после метки 6.
+    // Delay before UEFI: on Mariko the BPMP firmware is still training memory after Hekate,
+    // and early UEFI used to hang after mark 6 at that time.
     mov32   x1, TMR_US
     ldr     w2, [x1]
     mov32   w3, (DELAY_MS * 1000)
@@ -114,7 +117,7 @@ start:
     cmp     w4, w3
     b.lo    1b
 #endif
-    bl      uart_setup              // x20 = 1, если UART доступен
+    bl      uart_setup              // x20 = 1 if the UART is available
     adr     x0, msg_hello
     bl      puts
     mrs     x21, CurrentEL
@@ -128,14 +131,14 @@ start:
 
     cmp     x21, #2
     b.eq    el_ok
-    mov32   w0, MAGENTA             // Не EL2: дальше идти нельзя.
+    mov32   w0, MAGENTA             // Not EL2: cannot go on.
     bl      fill_screen
     b       halt
 
 el_ok:
 #if TEST_MODE
     adr     x1, a32_code
-    mov     x0, x20                 // Попадёт в r0: доступен ли UART.
+    mov     x0, x20                 // Goes to r0: whether the UART is available.
     b       enter_aarch32
 #else
     ldr     x2, payload_size
@@ -177,14 +180,14 @@ halt:
     wfe
     b       halt
 
-// Таблицы второй ступени: всё отображается само на себя, кроме страницы 0x700B0000.
-// Портит x9-x14.
+// Stage-2 tables: everything is identity-mapped except page 0x700B0000.
+// Clobbers x9-x14.
 build_s2:
     mov32   x9, S2_L1
     mov     x12, #S2_BLOCK
-    str     x12, [x9]               // 0..1 ГБ
+    str     x12, [x9]               // 0..1 GB
     mov32   x10, (S2_L2 | 3)
-    str     x10, [x9, #8]           // 1..2 ГБ -> L2
+    str     x10, [x9, #8]           // 1..2 GB -> L2
     mov     x11, #2
 1:  lsl     x10, x11, #30
     orr     x10, x10, x12
@@ -221,8 +224,8 @@ build_s2:
     ret
 
 #if !TEST_MODE && !CHAIN_A32
-// Переход в 64-битный EL1: Windows рассчитана на работу в EL1, а не в EL2.
-// x1 = адрес UEFI.
+// Switch to 64-bit EL1: Windows expects to run at EL1, not EL2.
+// x1 = UEFI address.
 enter_aarch64_el1:
     mrs     x2, midr_el1
     msr     vpidr_el2, x2
@@ -235,30 +238,30 @@ enter_aarch64_el1:
     dsb     sy
     adr     x3, trap_start
     msr     vbar_el2, x3
-    // Стек обработчиков — SP_EL2: при исключении процессор берёт именно его. Без SPSel=1
-    // «mov sp» мог попасть в SP_EL0, и первый же вход в обработчик зацикливался.
+    // The handler stack is SP_EL2: the CPU uses it on exception entry. Without SPSel=1
+    // "mov sp" could set SP_EL0, and the very first trap looped forever.
     msr     spsel, #1
     mov32   x3, TRAP_STACK
     mov     sp, x3
     mov32   x3, SMC_TRACE
     str     wzr, [x3]
-    // SMC пока не перехватываются. Сигнал от UEFI при передаче управления ОС — чтение
-    // ACTLR_EL1 (перехват TACR). HVC не подходит: ATF может запретить его (SCR_EL3.HCE).
+    // SMC is not trapped yet. UEFI signals the hand-off to the OS by reading
+    // ACTLR_EL1 (TACR trap). HVC does not work: ATF may disable it (SCR_EL3.HCE).
     mov32   x2, (HCR_RW | HCR_AMO | HCR_FMO | HCR_TACR)
     msr     hcr_el2, x2
-    mov32   x2, 0x33FF              // Не перехватывать FP и SIMD.
+    mov32   x2, 0x33FF              // Do not trap FP and SIMD.
     msr     cptr_el2, x2
     msr     hstr_el2, xzr
-    // MDCR_EL2: не перехватывать отладку и счётчики производительности, все счётчики — EL1.
+    // MDCR_EL2: do not trap debug and performance counters; all counters belong to EL1.
     mrs     x2, pmcr_el0
     ubfx    x2, x2, #11, #5
     msr     mdcr_el2, x2
-    mov     x2, #3                  // Доступ к счётчику и таймеру из EL1.
+    mov     x2, #3                  // EL1 access to the counter and timer.
     msr     cnthctl_el2, x2
     msr     cntvoff_el2, xzr
-    mov32   x2, 0x30C50838          // SCTLR при сбросе: MMU и кэши выключены.
+    mov32   x2, 0x30C50838          // SCTLR reset value: MMU and caches off.
     msr     sctlr_el1, x2
-    mov     x2, #0x3C5              // EL1h, прерывания замаскированы.
+    mov     x2, #0x3C5              // EL1h, interrupts masked.
     msr     spsr_el2, x2
     msr     elr_el2, x1
     mov     x0, xzr
@@ -273,18 +276,18 @@ enter_aarch64_el1:
 #if !TEST_MODE && !CHAIN_A32
     .balign 2048
 trap_start:
-    .skip   0x400                   // до векторов из EL1 (AArch64)
-    b       el1_sync                // +0x400: синхронное исключение из EL1 (SMC, HVC)
+    .skip   0x400                   // up to the vectors for EL1 (AArch64)
+    b       el1_sync                // +0x400: synchronous exception from EL1 (SMC, HVC)
     .balign 128
-    b       .                       // +0x480: IRQ из EL1 (сюда не направляются)
+    b       .                       // +0x480: IRQ from EL1 (never routed here)
     .balign 128
-    stp     x0, x1, [sp, #-16]!     // +0x500: FIQ из EL1
+    stp     x0, x1, [sp, #-16]!     // +0x500: FIQ from EL1
     mov32   w0, FIQ_COLOR
     b       trap_paint
     .balign 128
-    b       serror_note             // +0x580: SError из EL1
+    b       serror_note             // +0x580: SError from EL1
     .balign 128
-// w0 = цвет. Каждое событие рисует новую полосу; после лимита ловушка отключается.
+// w0 = colour. Every event draws a new bar; after the limit the trap is disabled.
 trap_paint:
     stp     x2, x3, [sp, #-16]!
     mov32   x1, TRAP_COUNT
@@ -292,7 +295,7 @@ trap_paint:
     add     w3, w2, #1
     str     w3, [x1]
     cbnz    w2, 3f
-    // Первое событие: заливаем весь экран и держим цвет, чтобы его было видно.
+    // First event: fill the whole screen and hold the colour so it can be seen.
     mov32   x1, FB_BASE
     mov32   w3, FB_PIXELS
 2:  str     w0, [x1], #4
@@ -330,29 +333,29 @@ trap_ret:
     ldp     x0, x1, [sp], #16
     eret
 
-// SMC (перехвачен через HCR_EL2.TSC) или HVC из EL1. Вызов уходит в ATF как есть,
-// кроме PSCI CPU_ON: ATF стартует новые ядра на EL2, поэтому адрес старта подменяется
-// на secondary_entry, которая понижает ядро до EL1 и переходит по адресу Windows.
+// SMC (trapped via HCR_EL2.TSC) or HVC from EL1. The call goes to ATF unchanged,
+// except PSCI CPU_ON: ATF starts new cores at EL2, so the entry point is replaced
+// with secondary_entry, which drops the core to EL1 and jumps to the Windows entry point.
 el1_sync:
     stp     x4, x5, [sp, #-16]!
     mrs     x4, esr_el2
     lsr     x4, x4, #26
-    cmp     x4, #0x17               // SMC из AArch64
+    cmp     x4, #0x17               // SMC from AArch64
     b.eq    1f
-    cmp     x4, #0x16               // HVC из AArch64
+    cmp     x4, #0x16               // HVC from AArch64
     b.eq    1f
-    cmp     x4, #0x18               // MRS/MSR: чтение ACTLR_EL1 — сигнал от UEFI
+    cmp     x4, #0x18               // MRS/MSR: ACTLR_EL1 read, the signal from UEFI
     b.eq    12f
-    cmp     x4, #0x24               // обращение EL1 к перехваченной странице (вторая ступень)
+    cmp     x4, #0x24               // EL1 access to the trapped page (stage 2)
     b.eq    mmio_trap
     mov32   w0, UNEXPECTED_COLOR
     bl      fill_screen
     mrs     x4, esr_el2
-    bl      show_bits               // 32 бита ESR_EL2: белый = 1, чёрный = 0
+    bl      show_bits               // 32 bits of ESR_EL2: white = 1, black = 0
     b       .
-1:  stp     x6, x30, [sp, #-16]!    // x30 — регистр Windows, bl его портит
-    bl      trace_mark              // красный: вызов ушёл в ATF
-    // журнал: номер функции и x1 в кольцевой буфер на 32 записи
+1:  stp     x6, x30, [sp, #-16]!    // x30 is a Windows register, bl clobbers it
+    bl      trace_mark              // red: the call went to ATF
+    // log: function ID and x1 into a 32-entry ring buffer
     mov32   x4, SMC_TRACE
     ldr     w5, [x4]
     sub     w5, w5, #1
@@ -363,8 +366,8 @@ el1_sync:
     dsb     sy
     ldp     x6, x30, [sp], #16
     b       11f
-12: mov32   x5, S2_L1               // UEFI: Windows стартует. Вторая ступень вкл.,
-    msr     vttbr_el2, x5           // перехват SMC вкл., ACTLR выкл.
+12: mov32   x5, S2_L1               // UEFI: Windows is starting. Stage 2 on,
+    msr     vttbr_el2, x5           // SMC trapping on, ACTLR trapping off.
     mov32   x5, VTCR_VAL
     msr     vtcr_el2, x5
     isb
@@ -377,7 +380,8 @@ el1_sync:
     tlbi    vmalls12e1
     dsb     sy
     isb
-    // Синий квадрат 24x24 слева от ряда трассировки: «пароль» получен.
+#if SHOW_TRACE
+    // Blue 24x24 square left of the trace row: the signal was received.
     stp     x6, x7, [sp, #-16]!
     mov32   x6, (FB_BASE + (TRACE_Y * FB_STRIDE + 8) * 4)
     mov32   w7, 0xFF2060FF
@@ -391,7 +395,8 @@ el1_sync:
     b.ne    9b
     dsb     sy
     ldp     x6, x7, [sp], #16
-    mov32   x0, SHIM_MAGIC          // UEFI читает ACTLR_EL1 в x0
+#endif
+    mov32   x0, SHIM_MAGIC          // UEFI reads ACTLR_EL1 into x0
     mrs     x5, elr_el2
     add     x5, x5, #4
     msr     elr_el2, x5
@@ -403,22 +408,22 @@ el1_sync:
     mov32   x5, PSCI_CPU_ON32
     cmp     x0, x5
     b.ne    3f
-2:  and     x5, x1, #0xFF           // номер ядра (Aff0)
+2:  and     x5, x1, #0xFF           // core number (Aff0)
     cmp     x5, #4
     b.hs    3f
     mov32   x4, SMP_TABLE
     add     x4, x4, x5, lsl #4
-    stp     x2, x3, [x4]            // адрес и context_id от Windows
+    stp     x2, x3, [x4]            // entry point and context_id from Windows
     dsb     sy
     adr     x2, secondary_entry
-    mov     x3, x5                  // context для secondary_entry: номер ядра
+    mov     x3, x5                  // context for secondary_entry: core number
 3:  smc     #0
     stp     x6, x30, [sp, #-16]!
-    bl      trace_mark_done         // зелёный: ATF ответил
+    bl      trace_mark_done         // green: ATF returned
     ldp     x6, x30, [sp], #16
     mrs     x5, esr_el2
     lsr     x5, x5, #26
-    cmp     x5, #0x17               // после SMC вернуться за инструкцию
+    cmp     x5, #0x17               // after an SMC, return past the instruction
     b.ne    4f
     mrs     x5, elr_el2
     add     x5, x5, #4
@@ -426,9 +431,9 @@ el1_sync:
 4:  ldp     x4, x5, [sp], #16
     eret
 
-// Квадратик 12x12 в ряду трассировки. trace_mark берёт следующий номер и красит красным,
-// trace_mark_done перекрашивает текущий в зелёный. Портит x6 (и x30 через bl), их сохраняет
-// вызывающий; x7-x9 сохраняются здесь.
+// A 12x12 square in the trace row. trace_mark takes the next number and paints it red,
+// trace_mark_done repaints the current one green. Clobbers x6 (and x30 via bl), saved by
+// the caller; x7-x9 are saved here.
 trace_mark:
     stp     x7, x8, [sp, #-16]!
     mov32   x7, SMC_TRACE
@@ -440,17 +445,21 @@ trace_mark:
     b       6f
 trace_mark_done:
     mov32   w6, 0xFF20FF20
-6:  stp     x7, x10, [sp, #-16]!
+6:
+#if !SHOW_TRACE
+    ret
+#endif
+    stp     x7, x10, [sp, #-16]!
     stp     x8, x9, [sp, #-16]!
     mov32   x7, SMC_TRACE
     ldr     w8, [x7]
     sub     w8, w8, #1
-    and     w9, w8, #31             // 32 квадратика в строке
+    and     w9, w8, #31             // 32 squares per row
     lsr     w8, w8, #5
-    and     w8, w8, #7              // до 8 строк
+    and     w8, w8, #7              // up to 8 rows
     mov     w7, #16
     mul     w9, w9, w7
-    add     w9, w9, #40             // x (левее — синий квадрат «пароль получен»)
+    add     w9, w9, #40             // x (the blue "signal received" square is to the left)
     mul     w8, w8, w7
     add     w8, w8, #TRACE_Y        // y
     mov     w7, #FB_STRIDE
@@ -470,10 +479,10 @@ trace_mark_done:
     ldp     x7, x10, [sp], #16
     ret
 
-// SError из EL1: экран не закрашивается. В верхней строке (y = 8) рисуются 32 бита ESR_EL2
-// последней ошибки квадратами 12x12 (белый = 1, серый = 0), ниже — полоска-счётчик ошибок.
-// Ошибка пропускается, Windows продолжает работу.
-// Обращение Windows к странице 0x700B0000: выполняем его сами той же ширины и пишем в журнал.
+// SError from EL1: the screen is not cleared. The top row (y = 8) shows the 32 bits of ESR_EL2
+// of the latest error as 12x12 squares (white = 1, grey = 0); below it, a bar counts errors.
+// The error is skipped and Windows keeps running.
+// Windows access to page 0x700B0000: perform it ourselves with the same width and log it.
 mmio_trap:
     ldp     x4, x5, [sp], #16
     sub     sp, sp, #256
@@ -494,21 +503,21 @@ mmio_trap:
     stp     x28, x29, [sp, #224]
     str     x30, [sp, #240]
     mrs     x0, esr_el2
-    tbz     x0, #24, mmio_bad       // нет описания команды (ISV=0)
+    tbz     x0, #24, mmio_bad       // no instruction syndrome (ISV=0)
     mrs     x1, hpfar_el2
     lsr     x1, x1, #4
     lsl     x1, x1, #12
     mrs     x2, far_el2
     and     x2, x2, #0xFFF
-    orr     x1, x1, x2              // физический адрес
-    ubfx    x3, x0, #16, #5         // номер регистра
-    ubfx    x4, x0, #22, #2         // ширина: 0=1, 1=2, 2=4, 3=8 байт
+    orr     x1, x1, x2              // physical address
+    ubfx    x3, x0, #16, #5         // register number
+    ubfx    x4, x0, #22, #2         // width: 0=1, 1=2, 2=4, 3=8 bytes
     mov     x5, xzr
     cmp     x3, #31
     b.eq    1f
     ldr     x5, [sp, x3, lsl #3]
 1:  tbz     x0, #6, 5f
-    cmp     x4, #0                  // запись
+    cmp     x4, #0                  // write
     b.ne    2f
     strb    w5, [x1]
     b       20f
@@ -522,7 +531,7 @@ mmio_trap:
     b       20f
 4:  str     x5, [x1]
     b       20f
-5:  cmp     x4, #0                  // чтение
+5:  cmp     x4, #0                  // read
     b.ne    6f
     ldrb    w5, [x1]
     tbz     x0, #21, 9f
@@ -541,19 +550,19 @@ mmio_trap:
     sxtw    x5, w5
     b       9f
 8:  ldr     x5, [x1]
-9:  // Возможности SDMMC1 (0x40): убираем бит 28 «64-битная шина». Тогда sdbus берёт 32-битный
-    // DMA и буферы ниже 4 ГБ, как в ARM32. С адресом выше 4 ГБ DMA контроллера вешал всю шину.
+9:  // SDMMC1 capabilities (0x40): clear bit 28 "64-bit system bus". Then sdbus uses 32-bit
+    // DMA and buffers below 4 GB, like ARM32. With addresses above 4 GB the controller DMA hung the bus.
     mov32   x6, 0x700B0040
     cmp     x1, x6
     b.ne    13f
     and     x5, x5, #0xffffffffefffffff
-13: tbnz    x0, #15, 10f            // SF: 64-битный регистр
+13: tbnz    x0, #15, 10f            // SF: 64-bit register
     mov     w5, w5
 10: cmp     x3, #31
     b.eq    20f
     str     x5, [sp, x3, lsl #3]
 20: dsb     sy
-    // журнал: (адрес & 0xFFFF) | ширина << 16 | запись << 18, затем значение
+    // log: (address & 0xFFFF) | width << 16 | write << 18, then the value
     mov32   x6, MMIO_COUNT
     ldr     w7, [x6]
     and     w8, w7, #63
@@ -611,7 +620,7 @@ serror_note:
     mrs     x4, esr_el2
     mov     x9, #8
     bl      row32
-    // только для первой ошибки: ELR_EL2 и ELR_EL1 (младшие 32 бита) и регистры чипа для SDMMC1
+    // first error only: ELR_EL2 and ELR_EL1 (low 32 bits) and the SD access log
     cmp     w13, #1
     b.ne    6f
     mrs     x4, elr_el2
@@ -620,7 +629,7 @@ serror_note:
     mrs     x4, elr_el1
     mov     x9, #56
     bl      row32
-    // журнал обращений к странице SD: общее число, затем 12 последних (описание, значение)
+    // SD page access log: total count, then the latest entries (descriptor, value)
     mov32   x11, MMIO_COUNT
     ldr     w4, [x11]
     mov     w12, w4
@@ -643,7 +652,7 @@ serror_note:
     add     x10, x10, #1
     cmp     x10, #MMIO_SHOW
     b.lo    7b
-6:  // счётчик: полоска длиной min(n, 500) пикселей на y = 24
+6:  // counter: a bar min(n, 500) pixels long at y = 24
     mov     w1, w13
     cmp     w1, #500
     mov     w2, #500
@@ -664,8 +673,8 @@ serror_note:
     ldp     x0, x1, [sp], #16
     eret
 
-// Рисует 32 бита w4 (старший первым) квадратами 12x12 на строке y = x9, группами по 4 бита.
-// Белый = 1, серый = 0. Портит x0, x2, x3, x5, x6, x7.
+// Draws the 32 bits of w4 (MSB first) as 12x12 squares on row y = x9, in groups of 4 bits.
+// White = 1, grey = 0. Clobbers x0, x2, x3, x5, x6, x7.
 row32:
     mov     x5, #31
 1:  lsr     x6, x4, x5
@@ -674,8 +683,8 @@ row32:
     cbz     x6, 2f
     mov32   w7, 0xFFFFFFFF
 2:  mov     x2, #31
-    sub     x2, x2, x5              // номер квадрата 0..31
-    lsr     x3, x2, #2              // номер группы
+    sub     x2, x2, x5              // square number 0..31
+    lsr     x3, x2, #2              // group number
     mov     x0, #6
     mul     x3, x3, x0
     lsl     x2, x2, #4
@@ -698,7 +707,7 @@ row32:
     ret
 
 
-// Рисует 32 бита x4 (старший первым) квадратами 36x36 в две строки по 16, начиная с y = 560.
+// Draws the 32 bits of x4 (MSB first) as 36x36 squares in two rows of 16, starting at y = 560.
 show_bits:
     mov     x5, #31
 1:  lsr     x6, x4, x5
@@ -707,7 +716,7 @@ show_bits:
     cbz     x6, 2f
     mov32   w7, 0xFFFFFFFF
 2:  mov     x8, #31
-    sub     x8, x8, x5              // номер квадрата 0..31
+    sub     x8, x8, x5              // square number 0..31
     and     x9, x8, #15
     lsr     x8, x8, #4
     mov     x10, #44
@@ -732,7 +741,7 @@ show_bits:
     dsb     sy
     ret
 
-// Сюда ATF ставит новое ядро (EL2, AArch64, MMU выключен), x0 = номер ядра.
+// ATF starts a new core here (EL2, AArch64, MMU off), x0 = core number.
 secondary_entry:
     msr     daifset, #0xF
     mov     x9, x0
@@ -746,8 +755,17 @@ secondary_entry:
     msr     vpidr_el2, x1
     mrs     x1, mpidr_el1
     msr     vmpidr_el2, x1
-    mov32   x1, (HCR_RW | HCR_AMO | HCR_FMO | HCR_TSC)
+    // stage 2 as on the first core: accesses to the SD page are trapped
+    mov32   x1, S2_L1
+    msr     vttbr_el2, x1
+    mov32   x1, VTCR_VAL
+    msr     vtcr_el2, x1
+    isb
+    mov32   x1, (HCR_RW | HCR_AMO | HCR_FMO | HCR_TSC | HCR_VM)
     msr     hcr_el2, x1
+    isb
+    tlbi    vmalls12e1
+    dsb     sy
     mov32   x1, 0x33FF
     msr     cptr_el2, x1
     msr     hstr_el2, xzr
@@ -761,9 +779,9 @@ secondary_entry:
     msr     sctlr_el1, x1
     mov32   x1, SMP_TABLE
     add     x1, x1, x9, lsl #4
-    ldp     x2, x0, [x1]            // x2 = адрес Windows, x0 = её context_id
+    ldp     x2, x0, [x1]            // x2 = Windows entry point, x0 = its context_id
     msr     elr_el2, x2
-    mov     x1, #0x3C5              // EL1h, прерывания замаскированы
+    mov     x1, #0x3C5              // EL1h, interrupts masked
     msr     spsr_el2, x1
     mov     x1, xzr
     mov     x2, xzr
@@ -776,19 +794,19 @@ trap_end:
 #endif
 
 #if TEST_MODE || CHAIN_A32
-// Переход в AArch32: нижний уровень (EL1) будет 32-битным.
-// x0 попадёт в r0, x1 = адрес 32-битного кода. Этот путь проверен белым экраном.
+// Switch to AArch32: the lower level (EL1) will be 32-bit.
+// x0 goes to r0, x1 = address of the 32-bit code. This path was checked with the white screen.
 enter_aarch32:
     msr     hcr_el2, xzr
     msr     cptr_el2, xzr
     msr     hstr_el2, xzr
-    // UEFI работает в EL1, поэтому даём ему доступ к таймеру.
+    // UEFI runs at EL1, so give it access to the timer.
     mov     x2, #3
     msr     cnthctl_el2, x2
     msr     cntvoff_el2, xzr
-    mov32   x2, 0x00C50838          // Значение SCTLR при сбросе: MMU и кэши выключены.
+    mov32   x2, 0x00C50838          // SCTLR reset value: MMU and caches off.
     msr     sctlr_el1, x2
-    mov     x2, #0x1D3              // Режим SVC, прерывания замаскированы.
+    mov     x2, #0x1D3              // SVC mode, interrupts masked.
     msr     spsr_el2, x2
     msr     elr_el2, x1
     dsb     sy
@@ -796,7 +814,7 @@ enter_aarch32:
     eret
 #endif
 
-// w0 = цвет. Портит x1, x2.
+// w0 = colour. Clobbers x1, x2.
 fill_screen:
     mov32   x1, FB_BASE
     mov32   x2, FB_PIXELS
@@ -806,8 +824,8 @@ fill_screen:
     dsb     sy
     ret
 
-// Обращение к UART с выключенным тактированием может подвесить шину,
-// поэтому сначала спрашиваем контроллер тактирования.
+// Accessing the UART with its clock off can hang the bus,
+// so ask the clock controller first.
 uart_setup:
     mov     x20, #0
     mov32   x1, CAR_BASE
@@ -818,7 +836,7 @@ uart_setup:
 
     mov32   x1, UART_BASE
     str     wzr, [x1, #UART_IER]
-    mov     w2, #0x83               // DLAB + 8 бит
+    mov     w2, #0x83               // DLAB + 8 bits
     str     w2, [x1, #UART_LCR]
     mov     w2, #UART_DIV
     str     w2, [x1, #UART_THR]
@@ -830,16 +848,16 @@ uart_setup:
     str     w2, [x1, #UART_FCR]
     ldr     w2, [x1, #UART_SPR]
     str     wzr, [x1, #UART_MCR]
-    mov     w2, #0x07               // Очистка очередей
+    mov     w2, #0x07               // Clear the FIFOs
     str     w2, [x1, #UART_FCR]
     mov     x20, #1
 9:  ret
 
-// w0 = символ. Портит x1, x2, x3.
+// w0 = character. Clobbers x1, x2, x3.
 putc:
     cbz     x20, 3f
     mov32   x1, UART_BASE
-    mov32   w3, 0x100000            // Лимит ожидания: не зависать из-за UART.
+    mov32   w3, 0x100000            // Wait limit: never hang on the UART.
 1:  ldr     w2, [x1, #UART_LSR]
     tbnz    w2, #5, 2f
     subs    w3, w3, #1
@@ -848,7 +866,7 @@ putc:
 2:  str     w0, [x1, #UART_THR]
 3:  ret
 
-// x0 = строка. Портит x0-x4, сохраняет адрес возврата в x5.
+// x0 = string. Clobbers x0-x4, keeps the return address in x5.
 puts:
     mov     x5, x30
     mov     x4, x0
@@ -869,6 +887,6 @@ a32_code:
     .incbin A32_BIN
 #endif
 
-    // build.py дополняет файл до кратного 8 байтам и дописывает UEFI сразу после.
+    // build.py pads the file to a multiple of 8 bytes and appends UEFI right after it.
     .balign 8
 payload:

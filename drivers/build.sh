@@ -1,7 +1,7 @@
 #!/bin/bash
-# Внутри контейнера switch-wp-drivers. Собирает и подписывает драйвер ARM32.
-#   build.sh <имя> <источник.c> <куда.sys>   EWDK=путь к "Windows Kits/10"
-#   ENTRY=DriverEntry — драйвер без WDF; HASH=sha1 — другой алгоритм подписи
+# Runs inside the switch-wp-drivers container. Builds and signs an ARM32 driver.
+#   build.sh <name> <source.c> <output.sys>   EWDK=path to "Windows Kits/10"
+#   ENTRY=DriverEntry: driver without WDF; HASH=sha1: different signing hash
 set -euo pipefail
 NAME="$1"; SRC="$2"; OUT="$3"
 I="$EWDK/Include"; L="$EWDK/Lib"; KM="$I/10.0.14393.0"
@@ -11,7 +11,7 @@ FLAGS=(--target=thumbv7-windows-msvc -fms-compatibility -fms-extensions -fno-sta
     -fshort-wchar -O2 -nostdinc -D_ARM_ -D_M_ARM=7 -DWIN32 -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00
     -DNTDDI_VERSION=0x0A000002 -D_KERNEL_MODE=1 -DKMDF_VERSION_MAJOR=1 -DKMDF_VERSION_MINOR=19
     -Wno-everything -isystem "$KM/km/crt" -isystem "$KM/km" -isystem "$KM/shared" -isystem "$I/wdf/kmdf/1.19")
-# WDM=1 — драйвер без WDF и без объекта load config из библиотек WDK.
+# WDM=1: driver without WDF and without the load-config object from the WDK libraries.
 if [ "${WDM:-0}" = 1 ]; then
     LIBS=("$A/ntoskrnl.lib" "$A/hal.lib")
     [ "${HID:-0}" = 1 ] && LIBS+=("$A/hidclass.lib")

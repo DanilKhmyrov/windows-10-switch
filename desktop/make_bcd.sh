@@ -1,15 +1,15 @@
 #!/bin/bash
-# Внутри контейнера switch-wp-drivers. Собирает BCD для Windows 10 ARM32 на основе BCD
-# из IoT Core: загрузчик смотрит на раздел 10815 МиБ, проверка подписей ослаблена.
-#   make_bcd.sh исходный_bcd выходной_BCD
+# Runs inside the switch-wp-drivers container. Builds the BCD for Windows 10 ARM32 from the
+# IoT Core BCD: the loader points at the 10815 MiB partition, signature checks are relaxed.
+#   make_bcd.sh source_bcd output_BCD
 set -euo pipefail
 SRC="$1"; OUT="$2"; HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
 cp "$SRC" "$OUT"
-python3 -I - "$HERE/../mobile" "$TMP/w32.reg" <<'PY'
+python3 -I - "$HERE" "$TMP/w32.reg" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
-import prepare as p
+import bcdlib as p
 L = p.LOADER
 out = open(sys.argv[2], "w")
 out.write("Windows Registry Editor Version 5.00\n\n")
