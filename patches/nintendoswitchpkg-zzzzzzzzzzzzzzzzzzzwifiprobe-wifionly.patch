@@ -1,7 +1,7 @@
 diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
 --- a/Drivers/SdMmcDxe/SdMmc.c
 +++ b/Drivers/SdMmcDxe/SdMmc.c
-@@ -576,7 +576,566 @@
+@@ -576,6 +576,578 @@
      __asm__ volatile("mrs x0, actlr_el1" : "+r"(X0) : : "memory");
  }
  #endif
@@ -9,9 +9,12 @@ diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
 +// ---- Wi-Fi bring-up probe (WIFI=1 test builds only) -------------------------------------------
 +// Powers the BCM4356 Wi-Fi radio, brings up the Tegra PCIe root port 1 (pci@2,0, UPHY lane
 +// pcie-0), assigns the endpoint BARs and reads the Broadcom chip ID through the BAR0 backplane
-+// window. No firmware is loaded and bus mastering (DMA) is never enabled. At the end the radio
-+// is put back into reset and the PCIe port into reset, then the results are drawn as rows of
-+// squares (white = 1, grey = 0, most significant bit first) and the boot continues after 20 s.
++// window. No firmware is loaded and bus mastering (DMA) stays off: the Windows driver (ACPI
++// WFI0, SWOA0D01) takes the prepared endpoint over. On success the AFI DMA path bypasses the
++// SMMU and the legacy interrupt controller forwards SPI 98 to the GIC. On any failure the radio
++// and the PCIe port go back into reset, which also hides WFI0 (its _STA checks those resets).
++// The results are drawn as rows of squares (white = 1, grey = 0, most significant bit first);
++// the boot continues after 5 s, or after 20 s when something failed.
 +//
 +// The sequence follows Switchroot Linux (pci-tegra.c, xusb-tegra210.c, clk-tegra210b01.c,
 +// tegra210b01-nx-pmic.dtsi: LDO1 = 1.0 V "vdd-pex", SD3 = 1.8 V) as ported by the winx project
@@ -154,7 +157,7 @@ diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
 +        }
 +    }
 +}
- 
++
 +STATIC BOOLEAN
 +WpPmicRead(UINT8 Reg, UINT8 *V)
 +{
@@ -556,24 +559,409 @@ diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
 +    V = MmioRead32(WP_MEM_BASE);
 +    WpLog(V);
 +    WpLog(WpRd(WP_AFI, WP_AFI_INTR_CODE));
-+    Ok = (V & 0xFFFF) == 0x4356;
++    if ((V & 0xFFFF) != 0x4356) goto Done;
++    // Stage 13: hand over to Windows. AFI DMA without SMMU translation (ASID 0), legacy
++    // interrupt controller bank 3: SPI 98 to the CPU as IRQ (not FIQ), not forced.
 +    Stage = 13;
++    MmioWrite32(0x70019238, 0);
++    if (MmioRead32(0x70019238) != 0) goto Done;
++    MmioWrite32(0x6000432C, MmioRead32(0x6000432C) & ~BIT2);
++    MmioWrite32(0x6000431C, BIT2);
++    MmioWrite32(0x60004324, BIT2);
++    if (!(MmioRead32(0x60004320) & BIT2) || (MmioRead32(0x6000432C) & BIT2)) goto Done;
++    Stage = 14;
++    Ok = TRUE;
 +
 +Done:
-+    if (Powered) WpOff(LinkUp);
++    if (Powered && !Ok) WpOff(LinkUp);
 +    WpDraw(Stage, Ok);
-+    RamUs(20000000);
++    RamUs(Ok ? 5000000 : 20000000);
 +}
-+
+ 
  // Windows has no fan driver, so run the fan at a fixed speed. This repeats
  // what hekate does in fan_set_duty() and regulator_5v_enable().
- #define FAN_DUTY_MAX    236
-@@ -1418,6 +1977,8 @@
+@@ -1418,6 +1990,8 @@
  	StepMark(3, !EFI_ERROR(BpmpEmcRaise(1600000)));
  	// A failed CPU switch leaves the old clock and voltage; boot continues either way.
  	StepMark(9, !EFI_ERROR(CpuBoost1428()));
-+	// Test builds only: power the Wi-Fi radio, read its chip ID over PCIe, power it down again.
++	// Wi-Fi builds only: prepare the Wi-Fi radio on PCIe for the Windows driver.
 +	WifiProbe();
  
  	Status = TegraMmcInit();
  	if (EFI_ERROR(Status)) goto exit;
+diff --git a/AcpiTables/Dsdt/Dsdt.asl b/AcpiTables/Dsdt/Dsdt.asl
+--- a/AcpiTables/Dsdt/Dsdt.asl
++++ b/AcpiTables/Dsdt/Dsdt.asl
+@@ -1,159 +1,213 @@
+-/** @file
+-  Differentiated System Description Table Fields (DSDT)
+-
+-  Copyright (c) 2014-2018, ARM Ltd. All rights reserved.<BR>
+-  Copyright (c) 2019-2020, Bingxing Wang. All rights reserved.<BR>
+-  Portion retrieved from Surface RT 2 DSDT dump
+-
+-  This program and the accompanying materials are licensed and made available under 
+-  the terms and conditions of the BSD License which accompanies this distribution.  
+-  The full text of the license may be found at
+-  http://opensource.org/licenses/bsd-license.php
+-
+-  THE PROGRAM IS DISTRIBUTED UNDER THE BSD LICENSE ON AN "AS IS" BASIS,
+-  WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
+-
+-**/
+-
+-#include "Platform.h"
+-
+-DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_OEM_REVISION) 
+-{
+-    Scope(_SB) 
+-    {
+-
+-        Device(CPU0) 
+-        {
+-            Name(_HID, "ACPI0007")
+-            Name(_UID, 0)
+-        }
+-
+-        Device(CPU1) 
+-        {
+-            Name(_HID, "ACPI0007")
+-            Name(_UID, 1)
+-        }
+-
+-        Device(CPU2) 
+-        {
+-            Name(_HID, "ACPI0007")
+-            Name(_UID, 2)
+-        }
+-
+-        Device(CPU3) 
+-        {
+-            Name(_HID, "ACPI0007")
+-            Name(_UID, 3)
+-        }
+-
+-        // Helper functions
+-        Method (GCRS, 3, NotSerialized)
+-        {
+-            Name (RSRC, ResourceTemplate ()
+-            {
+-                Memory32Fixed (ReadWrite,
+-                    0x00000000,         // Address Base
+-                    0x00000000,         // Address Length
+-                    _Y00)
+-                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive, ,, _Y01)
+-                {
+-                    0x00000000,
+-                }
+-            })
+-            CreateDWordField (RSRC, \_SB.GCRS._Y00._BAS, MBAS)  // _BAS: Base Address
+-            CreateDWordField (RSRC, \_SB.GCRS._Y00._LEN, MBLE)  // _LEN: Length
+-            CreateWordField (RSRC, \_SB.GCRS._Y01._INT, INTN)  // _INT: Interrupts
+-            MBAS = Arg0
+-            MBLE = Arg1
+-            INTN = Arg2
+-            Return (RSRC)
+-        }
+-
+-        Method (CRSD, 2, NotSerialized)
+-        {
+-            Name (RSRC, ResourceTemplate ()
+-            {
+-                FixedDMA (0x0000, 0x0000, Width32bit, _Y07)
+-                FixedDMA (0x0001, 0x0001, Width32bit, _Y08)
+-            })
+-            CreateWordField (RSRC, One, REQ1)
+-            CreateWordField (RSRC, \_SB.CRSD._Y07._TYP, CHN1)  // _TYP: Type
+-            CreateWordField (RSRC, \_SB.CRSD._Y08._DMA, REQ2)  // _DMA: Direct Memory Access
+-            CreateWordField (RSRC, \_SB.CRSD._Y08._TYP, CHN2)  // _TYP: Type
+-            REQ1 = Arg0
+-            REQ2 = (Arg0 | 0x20)
+-            CHN1 = Arg1
+-            CHN2 = Arg1++
+-            Return (RSRC)
+-        }
+-
+-        Method (CRS3, 5, NotSerialized)
+-        {
+-            Local0 = GCRS (Arg0, Arg1, Arg2)
+-            Local1 = CRSD (Arg3, Arg4)
+-            Return (ConcatenateResTemplate (Local0, Local1))
+-        }
+-
+-        // UART 2: Right Joy-Con
+-        Device (UAR2)
+-        {
+-            Method (_HID, 0, NotSerialized)
+-            {
+-                Return ("NVDA0100")
+-            }
+-
+-            Name (_UID, One)
+-            Method (_CRS, 0, NotSerialized)
+-            {
+-                Return (CRS3 (0x70006040, 0x40, 0x45, 0x09, 0x02))
+-            }
+-
+-            Method (_STA, 0, NotSerialized)
+-            {
+-                // AArch64: UART B is not clocked; Windows ARM64 has an inbox driver for NVDA0100
+-                // and touching it raised an SError. Hidden from the OS.
+-                Return (Zero)
+-            }
+-        }
+-
+-        // SDMMC1: microSD slot. Only this controller is described to Windows.
+-        Device (SDC1)
+-        {
+-            Name (_HID, "PNP0D40")
+-            Name (_UID, Zero)
+-            // Tegra SDMMC DMA does not snoop the CPU caches. Without _CCA = 0 Windows ARM64
+-            // treats the device as coherent, skips cache maintenance, and ADMA reads stale descriptors.
+-            Name (_CCA, Zero)
+-            Method (_CRS, 0, NotSerialized)
+-            {
+-                Return (GCRS (0x700B0000, 0x200, 0x2E))
+-            }
+-
+-            Method (_STA, 0, NotSerialized)
+-            {
+-                Return (0x0F)
+-            }
+-
+-            Device (SDMM)
+-            {
+-                Name (_ADR, Zero)
+-                Method (_RMV, 0, NotSerialized)
+-                {
+-                    Return (Zero)
+-                }
+-            }
+-        }
+-
+-        // Touch panel, read by our HID minidriver over I2C3.
+-        Device (TCH1)
+-        {
+-            Name (_HID, "SWTS0001")
+-            Name (_UID, Zero)
+-            Method (_STA, 0, NotSerialized)
+-            {
+-                Return (0x0F)
+-            }
+-        }
+-
+-    } // Scope(_SB)
+-}
++/** @file
++  Differentiated System Description Table Fields (DSDT)
++
++  Copyright (c) 2014-2018, ARM Ltd. All rights reserved.<BR>
++  Copyright (c) 2019-2020, Bingxing Wang. All rights reserved.<BR>
++  Portion retrieved from Surface RT 2 DSDT dump
++
++  This program and the accompanying materials are licensed and made available under 
++  the terms and conditions of the BSD License which accompanies this distribution.  
++  The full text of the license may be found at
++  http://opensource.org/licenses/bsd-license.php
++
++  THE PROGRAM IS DISTRIBUTED UNDER THE BSD LICENSE ON AN "AS IS" BASIS,
++  WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
++
++**/
++
++#include "Platform.h"
++
++DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_OEM_REVISION) 
++{
++    Scope(_SB) 
++    {
++
++        Device(CPU0) 
++        {
++            Name(_HID, "ACPI0007")
++            Name(_UID, 0)
++        }
++
++        Device(CPU1) 
++        {
++            Name(_HID, "ACPI0007")
++            Name(_UID, 1)
++        }
++
++        Device(CPU2) 
++        {
++            Name(_HID, "ACPI0007")
++            Name(_UID, 2)
++        }
++
++        Device(CPU3) 
++        {
++            Name(_HID, "ACPI0007")
++            Name(_UID, 3)
++        }
++
++        // Helper functions
++        Method (GCRS, 3, NotSerialized)
++        {
++            Name (RSRC, ResourceTemplate ()
++            {
++                Memory32Fixed (ReadWrite,
++                    0x00000000,         // Address Base
++                    0x00000000,         // Address Length
++                    _Y00)
++                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive, ,, _Y01)
++                {
++                    0x00000000,
++                }
++            })
++            CreateDWordField (RSRC, \_SB.GCRS._Y00._BAS, MBAS)  // _BAS: Base Address
++            CreateDWordField (RSRC, \_SB.GCRS._Y00._LEN, MBLE)  // _LEN: Length
++            CreateWordField (RSRC, \_SB.GCRS._Y01._INT, INTN)  // _INT: Interrupts
++            MBAS = Arg0
++            MBLE = Arg1
++            INTN = Arg2
++            Return (RSRC)
++        }
++
++        Method (CRSD, 2, NotSerialized)
++        {
++            Name (RSRC, ResourceTemplate ()
++            {
++                FixedDMA (0x0000, 0x0000, Width32bit, _Y07)
++                FixedDMA (0x0001, 0x0001, Width32bit, _Y08)
++            })
++            CreateWordField (RSRC, One, REQ1)
++            CreateWordField (RSRC, \_SB.CRSD._Y07._TYP, CHN1)  // _TYP: Type
++            CreateWordField (RSRC, \_SB.CRSD._Y08._DMA, REQ2)  // _DMA: Direct Memory Access
++            CreateWordField (RSRC, \_SB.CRSD._Y08._TYP, CHN2)  // _TYP: Type
++            REQ1 = Arg0
++            REQ2 = (Arg0 | 0x20)
++            CHN1 = Arg1
++            CHN2 = Arg1++
++            Return (RSRC)
++        }
++
++        Method (CRS3, 5, NotSerialized)
++        {
++            Local0 = GCRS (Arg0, Arg1, Arg2)
++            Local1 = CRSD (Arg3, Arg4)
++            Return (ConcatenateResTemplate (Local0, Local1))
++        }
++
++        // UART 2: Right Joy-Con
++        Device (UAR2)
++        {
++            Method (_HID, 0, NotSerialized)
++            {
++                Return ("NVDA0100")
++            }
++
++            Name (_UID, One)
++            Method (_CRS, 0, NotSerialized)
++            {
++                Return (CRS3 (0x70006040, 0x40, 0x45, 0x09, 0x02))
++            }
++
++            Method (_STA, 0, NotSerialized)
++            {
++                // AArch64: UART B is not clocked; Windows ARM64 has an inbox driver for NVDA0100
++                // and touching it raised an SError. Hidden from the OS.
++                Return (Zero)
++            }
++        }
++
++        // SDMMC1: microSD slot. Only this controller is described to Windows.
++        Device (SDC1)
++        {
++            Name (_HID, "PNP0D40")
++            Name (_UID, Zero)
++            // Tegra SDMMC DMA does not snoop the CPU caches. Without _CCA = 0 Windows ARM64
++            // treats the device as coherent, skips cache maintenance, and ADMA reads stale descriptors.
++            Name (_CCA, Zero)
++            Method (_CRS, 0, NotSerialized)
++            {
++                Return (GCRS (0x700B0000, 0x200, 0x2E))
++            }
++
++            Method (_STA, 0, NotSerialized)
++            {
++                Return (0x0F)
++            }
++
++            Device (SDMM)
++            {
++                Name (_ADR, Zero)
++                Method (_RMV, 0, NotSerialized)
++                {
++                    Return (Zero)
++                }
++            }
++        }
++
++        // Touch panel, read by our HID minidriver over I2C3.
++        Device (TCH1)
++        {
++            Name (_HID, "SWTS0001")
++            Name (_UID, Zero)
++            Method (_STA, 0, NotSerialized)
++            {
++                Return (0x0F)
++            }
++        }
++
++        // BCM4356 Wi-Fi on Tegra PCIe root port 1, prepared by UEFI (WifiProbe in SdMmc.c). The
++        // resources are the contract of the SwitchWifi driver (winx project, tegra_resources.h):
++        // PCIe host/AFI registers, the endpoint configuration window, the outbound memory
++        // aperture and the legacy INTx (GIC SPI 98). Present only when UEFI left the PCIe
++        // controller running (AFI/PEX clocks on, PEX/AFI/PCIEX resets released).
++        Device (WFI0)
++        {
++            Name (_HID, "SWOA0D01")
++            Name (_UID, Zero)
++            Name (_CCA, Zero)
++            OperationRegion (WCAR, SystemMemory, 0x60006000, 0x320)
++            Field (WCAR, DWordAcc, NoLock, Preserve)
++            {
++                Offset (0x0C),
++                RSTU, 32,
++                Offset (0x18),
++                ENBU, 32,
++                Offset (0x310),
++                RSTS, 32
++            }
++
++            Method (_STA, 0, Serialized)
++            {
++                If (((RSTU & 0x540) == Zero) && ((ENBU & 0x140) == 0x140))
++                {
++                    Return (0x0F)
++                }
++                Return (Zero)
++            }
++
++            Name (_CRS, ResourceTemplate ()
++            {
++                Memory32Fixed (ReadWrite, 0x01000000, 0x00004000)
++                Memory32Fixed (ReadWrite, 0x02000000, 0x00001000)
++                Memory32Fixed (ReadWrite, 0x13000000, 0x0D000000)
++                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x82 }
++            })
++
++            // Last-resort isolation used by the driver: Arg0 = 1 holds PEX, AFI and PCIEX in
++            // reset through the clock and reset controller. Returns 1 when that is confirmed.
++            Method (WIRS, 1, Serialized)
++            {
++                If (Arg0 == One)
++                {
++                    RSTS = 0x540
++                    If ((RSTU & 0x540) != 0x540)
++                    {
++                        Return (Zero)
++                    }
++                }
++                Return (One)
++            }
++        }
++
++    } // Scope(_SB)
++}
