@@ -1,4 +1,4 @@
-# Windows 10 Switch
+# Windows Switch
 
 > **Built by Claude.** Almost everything in this repository was written by Claude, Anthropic's AI
 > assistant, working in Claude Code. That covers the EL2 shim, the UEFI patches, the drivers, the
@@ -7,13 +7,13 @@
 > the console. He set the goals and ran every build on real hardware, reporting back with photos of
 > the screen.
 
-Native Windows 10 on the Nintendo Switch: no emulation, no Linux underneath. Hekate starts our
+Native Windows 10 and Windows 11 on the Nintendo Switch: no emulation, no Linux underneath. Hekate starts our
 own EL2 shim, the shim starts a patched [NintendoSwitchPkg](https://github.com/imbushuo/NintendoSwitchPkg)
 UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 
-| Windows 10 ARM32 (build 15035) | ARM32 Start menu and Action Center | Windows 10 ARM64 (22H2), Start menu opened by touch |
+| Windows 10 ARM32 (build 15035) | Windows 10 ARM64 (22H2), Start menu opened by touch | Windows 11 ARM64 (23H2) |
 |:---:|:---:|:---:|
-| ![ARM32 desktop](docs/screenshots/arm32-desktop.jpg) | ![ARM32 Start menu](docs/screenshots/arm32-start-menu.jpg) | ![ARM64 desktop](docs/screenshots/arm64-desktop.jpg) |
+| ![ARM32 desktop](docs/screenshots/arm32-desktop.jpg) | ![Windows 10 ARM64 desktop](docs/screenshots/arm64-desktop.jpg) | ![Windows 11 ARM64 desktop](docs/screenshots/win11-arm64-desktop.jpg) |
 
 > **The first rule of this project is not to harm the console.** Everything here was tested on one
 > Mariko unit (T210B01, HAC-001-01). Clock and voltage changes stay within the limits used by
@@ -22,22 +22,25 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 > **Experimental, for developers.** This is a research project, not a polished installer.
 > The ARM64 path below is scripted end to end, but so far it has only been run on the author's
 > card, which was set up step by step; the clean-card path was tested on a disk image, not on a
-> second console. Touch works on both; there is no USB yet.
+> second console. Touch works on all three; there is no USB yet. Windows 11 was installed next
+> to Windows 10 on the test card with `desktop/add_windows_partition.py` (see below).
 > The ARM32 path depends on a rare 15035 build and an IoT Core BCD and is documented for reference.
 
 ## Status
 
-| | Windows 10 ARM32 | Windows 10 ARM64 |
-|---|---|---|
-| Build | 15035 (Enterprise Insider Preview) | 19041/19045 (22H2 Pro) |
-| Boot to desktop | yes, autologon as user `Player` | yes, autologon as user `Player` |
-| CPU cores | 1 | 4 at ~1786 MHz (via PSCI trapping in the shim) |
-| SD card | inbox `sdbus` | inbox `sdbus` through the shim's stage-2 trap |
-| Touch screen | yes, multi-touch (`drivers/swhid`) | yes, same driver built for ARM64 |
-| Battery, charger, fan, overheat shutdown | yes (`drivers/swbatt`) | yes, same driver built for ARM64 |
-| CPU / RAM clocks | 1785 MHz at 1120 mV / ~1600 MHz | same UEFI code |
-| Display | GOP framebuffer (Basic Display), portrait | same |
-| USB, Wi-Fi, Bluetooth, audio, GPU | no | no |
+| | Windows 10 ARM32 | Windows 10 ARM64 | Windows 11 ARM64 |
+|---|---|---|---|
+| Build | 15035 (Enterprise Insider Preview) | 19041/19045 (22H2 Pro) | 22631 (23H2 Pro) |
+| Boot to desktop | yes, autologon as user `Player` | yes, autologon as user `Player` | yes, autologon as user `Player` |
+| CPU cores | 1 | 4 at ~1786 MHz (via PSCI trapping in the shim) | 4, same shim |
+| SD card | inbox `sdbus` | inbox `sdbus` through the shim's stage-2 trap | same |
+| Touch screen | yes, multi-touch (`drivers/swhid`) | yes, same driver built for ARM64 | yes, same ARM64 binary |
+| Battery, charger, fan, overheat shutdown | yes (`drivers/swbatt`) | yes, same driver built for ARM64 | yes, same ARM64 binary |
+| CPU / RAM clocks | 1785 MHz at 1120 mV / ~1600 MHz | same UEFI code | same UEFI code |
+| Display | GOP framebuffer (Basic Display), portrait | same | same |
+| USB, Wi-Fi, Bluetooth, audio, GPU | no | no | no |
+
+Windows 11 24H2 and later will not run: they need ARMv8.1 atomics, which the Cortex-A57 lacks.
 
 ## How it works
 
@@ -87,7 +90,8 @@ only, and `*-cleanonly.patch` only into `CLEAN=1` builds.
 | `*rtnull-a64only` | Null DebugLib/SerialPortLib for runtime drivers (they crashed after SetVirtualAddressMap) |
 | `*nouart-a64only` | hide UART B (`NVDA0100`): it is unclocked and the inbox ARM64 driver hit an SError |
 | `*cca-a64only` | `_CCA = 0` on SDMMC1: Tegra SDMMC DMA does not snoop CPU caches |
-| `*bootopt-a64only` | register "Windows Boot Manager" with a full partition device path (needed by Windows Setup) |
+| `*bootopt-a64only` | register "Windows Boot Manager" with a full partition device path; boots the partition holding `\EFI\Boot\bootaa64.efi` |
+| `*win11-win11only` | `WIN11=1` builds (`bl33-64-win11.bin`) boot the partition holding `\EFI\Microsoft\Boot\win11.tag` instead, so both systems can share one card |
 
 ### Windows images (`desktop/`)
 
@@ -100,6 +104,9 @@ Microsoft images inside a Linux container (`ntfs-3g`, `hivex`, `wimlib`):
   [Getting started](#getting-started-windows-10-arm64)). Also produces the boot partition contents
   and a BCD generated from the image's own `BCD-Template` for your card.
 - `setup_card.py`: partitions a card for ARM64 and installs a build onto it (macOS).
+- `add_windows_partition.py`: adds a second ARM64 Windows (Windows 11) to a card that already has
+  one: writes the image into free space and an MBR slot, puts its boot manager with the
+  `win11.tag` marker on the Hekate partition and creates the `wp11` menu entry.
 - `make_bcd.sh` (ARM32, from an IoT Core BCD), `make_bcd64.sh`, `bcdlib.py`: BCD stores pointing at
   MBR partitions by disk signature and offset.
 - `skip_bcd_step.sh`: removes `Sysprep_Specialize_Bcd`, which needs persistent UEFI variables.
@@ -168,18 +175,33 @@ space.
    reboots once more; after that, touch and the battery icon work. Logs are in `agent\` on the
    `WINBOOT` partition.
 
+## Windows 11 ARM64
+
+Same pipeline as Windows 10 ARM64, with a Windows 11 23H2 ARM64 ESD:
+
+1. Build the image with `build_w64.sh` for the target partition, and the loader with
+   `WIN11=1 ARCH=AARCH64 ./uefi/build_bl33.sh` (produces the `-win11` firmware).
+2. `sudo python3 -I desktop/add_windows_partition.py partition ...` writes the image,
+   `... hekate ...` adds the boot files and the *Windows 11 ARM64* menu entry.
+3. Setup stops once with "Windows could not update the computer's boot configuration". Power
+   off, recover the `SYSTEM` hive (`hive_recover.py`), set
+   `HKLM\SYSTEM\Setup\Status\ChildCompletion\setup.exe = 3` and write the hive back in place
+   (`replace_extent.py`). Setup then finishes and reaches the desktop.
+4. On the first desktop boot the agent installs the same ARM64 touch and battery drivers and
+   reboots once.
+
 ## SD card layout (MBR)
 
 `setup_card.py` creates: 1. FAT32 `SWITCH` (Hekate, `wp64/`), 2. FAT32 `WINBOOT` 512 MiB (boot
 manager, BCD, `agent\`), 3. NTFS Windows 10 ARM64.
 
-The test console's card carries both systems:
+The test console's card now carries Windows 10 and Windows 11 ARM64 (ARM32 was removed):
 
 | # | Start | Size | Contents |
 |---|---|---|---|
-| 1 | 2 MiB | | FAT32, type EF: Hekate, `wp/` (ARM32 loader), `wp64/` (ARM64 loader), ARM32 boot manager and BCD |
-| 2 | 10815 MiB | 12 GiB | NTFS: Windows 10 ARM32 |
-| 3 | 1416 MiB | 600 MB | FAT `CRASHDUMP`: ARM64 boot manager and BCD, `agent\` scripts and logs |
+| 1 | 2 MiB | 64 MiB | FAT32 (type 0C): Hekate, `wp64/`, `wp11/`, Windows 11 boot manager and BCD (`win11.tag`) |
+| 2 | 2048 MiB | 21056 MiB | NTFS: Windows 11 ARM64 |
+| 3 | 1416 MiB | 600 MB | FAT `CRASHDUMP`: Windows 10 boot manager and BCD, `agent\` scripts and logs |
 | 4 | 23104 MiB | 24 GiB | NTFS: Windows 10 ARM64 |
 
 Hekate menu entries (`bootloader/ini/*.ini`):
@@ -193,6 +215,11 @@ uart_port=2
 [Windows 10 ARM64]
 l4t=1
 boot_prefixes=wp64/
+uart_port=2
+
+[Windows 11 ARM64]
+l4t=1
+boot_prefixes=wp11/
 uart_port=2
 ```
 
@@ -230,10 +257,11 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
   64-bit ADMA2 reading stale descriptors. Windows ARM64 treats devices without `_CCA` as cache
   coherent and skips cache maintenance, but Tegra SDMMC is not coherent. Fixed with `_CCA = 0` and
   32-bit DMA.
-- **"Windows could not update the computer's boot configuration"**: Windows Setup finds its system
-  partition through `BootCurrent`. EDK2's automatic removable-media option has no partition
-  node, so UEFI now registers a full-path option. After such a failure, set
-  `HKLM\SYSTEM\Setup\Status\ChildCompletion\setup.exe = 3`.
+- **"Windows could not update the computer's boot configuration"** (`BFSVC: Failed to get
+  partition name`, 0xc0000452): it happens on Windows 10 and 11 ARM64 alike. Registering a
+  full-path boot option in UEFI and changing the boot partition type (0C or EF) did not help.
+  What works: after the failure, set `HKLM\SYSTEM\Setup\Status\ChildCompletion\setup.exe = 3`
+  and setup continues to the desktop. Our boot loader does not need the BCD changes it skipped.
 - **BCD `truncatememory` is not honoured** by ARM64 Windows for DMA buffers.
 - Moving the 64-bit UEFI's memory region below 4 GB breaks its early start.
 - **"Windows could not configure Windows to run on this computer's hardware"** (Windows 11 setup):
@@ -251,7 +279,7 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 - Wi-Fi, Bluetooth and audio. [winx](https://github.com/steck0714/winx) has GPL-2.0 ARM64
   drivers for these, to be reviewed and ported.
 - ARM32 on 4 cores through the same PSCI trapping (needs an AArch32 trap path).
-- Windows 11 ARM64 up to 23H2. 24H2 and later need ARMv8.1 atomics, which Cortex-A57 lacks.
+- Set `ChildCompletion` in the image build so setup needs no manual step.
 
 ## Credits
 
