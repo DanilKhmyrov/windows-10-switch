@@ -1,0 +1,579 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -576,7 +576,566 @@
+     __asm__ volatile("mrs x0, actlr_el1" : "+r"(X0) : : "memory");
+ }
+ #endif
++
++// ---- Wi-Fi bring-up probe (WIFI=1 test builds only) -------------------------------------------
++// Powers the BCM4356 Wi-Fi radio, brings up the Tegra PCIe root port 1 (pci@2,0, UPHY lane
++// pcie-0), assigns the endpoint BARs and reads the Broadcom chip ID through the BAR0 backplane
++// window. No firmware is loaded and bus mastering (DMA) is never enabled. At the end the radio
++// is put back into reset and the PCIe port into reset, then the results are drawn as rows of
++// squares (white = 1, grey = 0, most significant bit first) and the boot continues after 20 s.
++//
++// The sequence follows Switchroot Linux (pci-tegra.c, xusb-tegra210.c, clk-tegra210b01.c,
++// tegra210b01-nx-pmic.dtsi: LDO1 = 1.0 V "vdd-pex", SD3 = 1.8 V) as ported by the winx project
++// (github.com/steck0714/winx, Drivers/WifiBtApp/WifiPcie.h and WifiPexStages.h, GPL-2.0).
++// For Wi-Fi, Switchroot's Iowa (modin) and Lite (vali) trees use the same rails, pins and port.
++
++#define WP_CAR              0x60006000
++#define WP_PMC              0x7000E400
++#define WP_PADCTL           0x7009F000
++#define WP_PINMUX           0x70003000
++#define WP_GPIO             0x6000D000
++#define WP_PADS             0x01003000
++#define WP_AFI              0x01003800
++#define WP_CS               0x02000000
++#define WP_RP               0x01001000          // root port 1 config space (0x01000000 + 1 * 0x1000)
++#define WP_MEM_BASE         0x13000000
++#define WP_MEM_SIZE         0x0D000000
++#define WP_PMIC             0x3C
++
++#define WP_RST_U_SET        0x310
++#define WP_RST_U_CLR        0x314
++#define WP_ENB_U_SET        0x330
++#define WP_ENB_V_SET        0x440
++#define WP_RST_W            0x35C
++#define WP_ENB_W            0x364
++#define WP_RST_W_SET        0x438
++#define WP_RST_W_CLR        0x43C
++#define WP_ENB_W_SET        0x448
++#define WP_RST_Y_CLR        0x2AC
++#define WP_PLLE_BASE        0x0E8
++#define WP_PLLE_MISC        0x0EC
++#define WP_PLLE_SS          0x068
++#define WP_PLLE_AUX         0x48C
++#define WP_XUSBIO_PLL       0x51C
++#define WP_U_PEX            BIT6
++#define WP_U_AFI            BIT8
++#define WP_U_PCIEX          BIT10
++#define WP_W_PADCTL         BIT14
++#define WP_W_XUSB           BIT15
++#define WP_Y_UPHY           BIT13
++
++#define WP_PG_TOGGLE        0x030
++#define WP_PG_CLAMP         0x034
++#define WP_PG_STATUS        0x038
++#define WP_PG_PCIE          3
++
++#define WP_ELPG_PROGRAM1    0x024
++#define WP_USB3_PAD_MUX     0x028
++#define WP_PLL_P0_1         0x360
++#define WP_PLL_P0_2         0x364
++#define WP_PLL_P0_4         0x36C
++#define WP_PLL_P0_8         0x37C
++
++#define WP_AFI_BAR0_SZ      0x00
++#define WP_AFI_BAR3_SZ      0x0C
++#define WP_AFI_BAR4_SZ      0x10
++#define WP_AFI_BAR5_SZ      0x14
++#define WP_AFI_BAR0_START   0x18
++#define WP_AFI_BAR3_START   0x24
++#define WP_AFI_BAR4_START   0x28
++#define WP_AFI_BAR5_START   0x2C
++#define WP_AFI_FPCI_BAR0    0x30
++#define WP_AFI_FPCI_BAR3    0x3C
++#define WP_AFI_FPCI_BAR4    0x40
++#define WP_AFI_FPCI_BAR5    0x44
++#define WP_AFI_MSI_BAR_SZ   0x60
++#define WP_AFI_MSI_FPCI     0x64
++#define WP_AFI_MSI_AXI      0x68
++#define WP_AFI_CONFIG       0x0AC
++#define WP_AFI_ERR_MASKS    0x0B0
++#define WP_AFI_INTR_MASK    0x0B4
++#define WP_AFI_INTR_CODE    0x0B8
++#define WP_AFI_SM_INTR_EN   0x0C4
++#define WP_AFI_AFI_INTR_EN  0x0C8
++#define WP_AFI_PCIE_CONFIG  0x0F8
++#define WP_AFI_FUSE         0x104
++#define WP_AFI_PEX1_CTRL    0x118
++#define WP_AFI_PLLE_CONTROL 0x160
++#define WP_AFI_PEXBIAS      0x168
++
++#define WP_GPIO_H_CNF       0x10C
++#define WP_GPIO_H_OE        0x11C
++#define WP_GPIO_H_OUT       0x12C
++#define WP_H0               BIT0                // RF_DISABLE (low while running)
++#define WP_H1               BIT1                // WIFI_RST (high = chip running)
++#define WP_H2               BIT2                // WIFI_WAKE_AP (input)
++
++STATIC UINT32 mWpRows[16];
++STATIC UINTN  mWpRowCount;
++
++STATIC UINT32 WpRd(UINTN B, UINTN O) { return MmioRead32(B + O); }
++STATIC VOID   WpWr(UINTN B, UINTN O, UINT32 V) { MmioWrite32(B + O, V); }
++STATIC VOID   WpRm(UINTN B, UINTN O, UINT32 Clr, UINT32 Set) { WpWr(B, O, (WpRd(B, O) & ~Clr) | Set); }
++STATIC VOID   WpMs(UINT32 Ms) { while (Ms--) RamUs(1000); }
++
++STATIC VOID
++WpLog(UINT32 V)
++{
++    if (mWpRowCount < ARRAY_SIZE(mWpRows)) mWpRows[mWpRowCount++] = V;
++}
++
++STATIC BOOLEAN
++WpWait(UINTN B, UINTN O, UINT32 Mask, UINT32 Val, UINT32 TimeoutUs)
++{
++    UINT32 T;
++
++    for (T = 0; T < TimeoutUs; T += 10) {
++        if ((WpRd(B, O) & Mask) == Val) return TRUE;
++        RamUs(10);
++    }
++    return (WpRd(B, O) & Mask) == Val;
++}
++
++// Row 0 is the result: last stage reached in bits 7:0, bit 31 set when everything passed.
++// Then one row per logged value, 16 px squares, groups of four, from the top of the screen.
++STATIC VOID
++WpDraw(UINT32 Stage, BOOLEAN Ok)
++{
++    volatile UINT32 *Fb = (volatile UINT32 *) (UINTN) 0xF5A00000;
++    UINTN R, B, X, Y;
++
++    for (R = 0; R <= mWpRowCount; R++) {
++        UINT32 V = R == 0 ? (Stage | (Ok ? BIT31 : 0)) : mWpRows[R - 1];
++        UINTN Top = 40 + R * 30;
++        for (Y = Top - 4; Y < Top + 20; Y++) {
++            for (X = 0; X < 720; X++) Fb[Y * 720 + X] = 0xFF000000;
++        }
++        // A colored tag on the left marks the result row: green = all passed, magenta = failed.
++        if (R == 0) {
++            for (Y = Top; Y < Top + 16; Y++) {
++                for (X = 8; X < 28; X++) Fb[Y * 720 + X] = Ok ? 0xFF00FF00 : 0xFFFF00FF;
++            }
++        }
++        for (B = 0; B < 32; B++) {
++            UINT32 Color = (V >> (31 - B)) & 1 ? 0xFFFFFFFF : 0xFF505050;
++            UINTN Left = 40 + B * 19 + (B / 4) * 8;
++            for (Y = Top; Y < Top + 16; Y++) {
++                for (X = Left; X < Left + 16; X++) Fb[Y * 720 + X] = Color;
++            }
++        }
++    }
++}
+ 
++STATIC BOOLEAN
++WpPmicRead(UINT8 Reg, UINT8 *V)
++{
++    return CpuRegRead(WP_PMIC, Reg, V);
++}
++
++STATIC VOID
++WpGpioH(UINT32 Pins, UINT32 Out, BOOLEAN Drive)
++{
++    WpWr(WP_GPIO, WP_GPIO_H_CNF, WpRd(WP_GPIO, WP_GPIO_H_CNF) | Pins);
++    if (Drive) {
++        WpWr(WP_GPIO, WP_GPIO_H_OUT, (WpRd(WP_GPIO, WP_GPIO_H_OUT) & ~Pins) | (Out ? Pins : 0));
++        WpWr(WP_GPIO, WP_GPIO_H_OE, WpRd(WP_GPIO, WP_GPIO_H_OE) | Pins);
++    } else {
++        WpWr(WP_GPIO, WP_GPIO_H_OE, WpRd(WP_GPIO, WP_GPIO_H_OE) & ~Pins);
++    }
++    (VOID) WpRd(WP_GPIO, WP_GPIO_H_CNF);
++}
++
++// LDO1 ("vdd-pex", PCIe/XUSB PLL rails) at 1.0 V as in tegra210b01-nx-pmic.dtsi; SD3 must already
++// be the 1.8 V I/O rail and is never changed.
++STATIC BOOLEAN
++WpSupply(VOID)
++{
++    UINT8 Cfg, Cfg2, Fps, Sd3, Ame, Now;
++    UINTN Try;
++
++    if (!WpPmicRead(0x25, &Cfg) || !WpPmicRead(0x26, &Cfg2) || !WpPmicRead(0x47, &Fps) ||
++        !WpPmicRead(0x19, &Sd3) || !WpPmicRead(0x40, &Ame)) return FALSE;
++    WpLog(((UINT32) Sd3 << 24) | ((UINT32) Cfg << 16) | ((UINT32) Cfg2 << 8) | Fps);
++    WpLog(Ame);
++    if (Sd3 != 0x60) return FALSE;
++    if (Cfg2 & BIT3) {
++        // Already on: keep it only at 1.0-1.05 V.
++        if ((Cfg & 0x3F) < 8 || (Cfg & 0x3F) > 10) return FALSE;
++    } else {
++        if (!CpuRegWrite(WP_PMIC, 0x25, 0x08) ||
++            !CpuRegWrite(WP_PMIC, 0x47, (UINT8) (Fps | 0xC0)) ||
++            !CpuRegWrite(WP_PMIC, 0x25, 0xC8)) return FALSE;
++        RamUs(1000);
++        for (Try = 0; Try < 20; Try++) {
++            if (!WpPmicRead(0x26, &Cfg2)) return FALSE;
++            if (Cfg2 & BIT3) break;
++            RamUs(100);
++        }
++        if (!WpPmicRead(0x25, &Now)) return FALSE;
++        WpLog(((UINT32) Now << 8) | Cfg2);
++        if (Now != 0xC8 || !(Cfg2 & BIT3)) return FALSE;
++    }
++    // 32 kHz clock for the radio: MAX77620 GPIO4 in its "32k-out1" function (PMIC dtsi pin_gpio4).
++    if (!(Ame & BIT4) && !CpuRegWrite(WP_PMIC, 0x40, (UINT8) (Ame | BIT4))) return FALSE;
++    return TRUE;
++}
++
++STATIC BOOLEAN
++WpPlle(VOID)
++{
++    UINT32 V;
++
++    if (WpRd(WP_CAR, WP_PLLE_AUX) & BIT24) return TRUE;          // HW sequencer already running
++    if (WpRd(WP_CAR, WP_PLLE_BASE) & BIT31) return TRUE;         // already enabled
++    WpRm(WP_CAR, WP_PLLE_BASE, BIT30, 0);
++    V = WpRd(WP_CAR, WP_PLLE_MISC);
++    V |= BIT9 | BIT14 | BIT8;
++    V &= ~(BIT13 | (3U << 4) | (2U << 2));
++    WpWr(WP_CAR, WP_PLLE_MISC, V);
++    RamUs(5);
++    WpRm(WP_CAR, WP_PLLE_SS, 0, BIT10 | BIT11 | BIT12);
++    WpRm(WP_CAR, WP_PLLE_BASE, 0xFF | (0xFFU << 8) | (0x1FU << 24), 2 | (125U << 8) | (14U << 24));
++    RamUs(1);
++    WpRm(WP_CAR, WP_PLLE_BASE, 0, BIT31);
++    if (!WpWait(WP_CAR, WP_PLLE_MISC, BIT11, BIT11, 20000)) return FALSE;
++    V = WpRd(WP_CAR, WP_PLLE_SS);
++    V &= ~(BIT14 | BIT15 | 0x1FF | (0xFFU << 16) | (0x3FU << 24));
++    V |= 0x25U | (1U << 16) | (0x20U << 24);                     // T210B01 spread coefficients
++    WpWr(WP_CAR, WP_PLLE_SS, V);
++    V &= ~(BIT12 | BIT10);
++    WpWr(WP_CAR, WP_PLLE_SS, V);
++    RamUs(1);
++    V &= ~BIT11;
++    WpWr(WP_CAR, WP_PLLE_SS, V);
++    RamUs(1);
++    return TRUE;
++}
++
++STATIC VOID
++WpPlleHwSequence(VOID)
++{
++    UINT32 V;
++
++    if (WpRd(WP_CAR, WP_PLLE_AUX) & BIT24) return;
++    if (!(WpRd(WP_CAR, WP_PLLE_MISC) & BIT11)) return;
++    WpRm(WP_CAR, WP_PLLE_MISC, BIT14, 0);
++    V = WpRd(WP_CAR, WP_PLLE_AUX);
++    V |= BIT3 | BIT31;
++    V &= ~(BIT4 | BIT6);
++    WpWr(WP_CAR, WP_PLLE_AUX, V);
++    RamUs(1);
++    V |= BIT24;
++    WpWr(WP_CAR, WP_PLLE_AUX, V);
++    RamUs(1);
++}
++
++STATIC BOOLEAN
++WpUphy(VOID)
++{
++    STATIC CONST UINT32 PllData[] = {
++        (0x02U << 16) | 0x0000U, (0x03U << 16) | 0x7051U, (0x25U << 16) | 0x0130U, (0x1EU << 16) | 0x0017U
++    };
++    UINTN I;
++
++    // XUSB padctl: clock on, padctl reset released.
++    if (!((WpRd(WP_CAR, WP_ENB_W) & WP_W_XUSB) && !(WpRd(WP_CAR, WP_RST_W) & (WP_W_XUSB | WP_W_PADCTL)))) {
++        WpWr(WP_CAR, WP_ENB_W_SET, WP_W_XUSB);
++        WpWr(WP_CAR, WP_RST_W_SET, WP_W_XUSB);
++        RamUs(2);
++        WpWr(WP_CAR, WP_RST_W_CLR, WP_W_XUSB);
++        WpWr(WP_CAR, WP_RST_W_CLR, WP_W_PADCTL);
++        RamUs(2);
++        if (WpRd(WP_CAR, WP_RST_W) & (WP_W_XUSB | WP_W_PADCTL)) return FALSE;
++    }
++    // B01 UPHY management clock: pll_p -> hsio -> xusb -> uphy, 408 MHz * 2 / 8 = 102 MHz.
++    WpRm(WP_CAR, 0x680, 0, BIT29 | BIT28);
++    WpRm(WP_CAR, 0x6D0, 0xFFU, BIT8 | 6U);
++    RamUs(2);
++    if ((WpRd(WP_CAR, 0x680) & (BIT29 | BIT28)) != (BIT29 | BIT28) ||
++        (WpRd(WP_CAR, 0x6D0) & 0x1FFU) != (BIT8 | 6U)) return FALSE;
++
++    if (!(WpRd(WP_CAR, WP_XUSBIO_PLL) & BIT24)) {
++        WpWr(WP_CAR, WP_RST_Y_CLR, WP_Y_UPHY);
++        RamUs(10);
++        WpRm(WP_PADCTL, 0x460, 3U << 24, 1U << 24);                       // lane 0 RX idle threshold
++        WpWr(WP_PADCTL, 0x47C, BIT27 | BIT24 | (0x97U << 16) | 0x80U);    // lane 0 defaults
++        for (I = 0; I < ARRAY_SIZE(PllData); I++) {
++            WpWr(WP_PADCTL, 0x384, BIT27 | BIT24 | PllData[I]);           // PLL CTL10 table
++        }
++        WpRm(WP_PADCTL, WP_PLL_P0_1, 0, BIT4);
++        WpRm(WP_PADCTL, WP_PLL_P0_2, 0, BIT2);
++        WpRm(WP_PADCTL, WP_PLL_P0_8, 0, BIT15);
++        WpRm(WP_PADCTL, WP_PLL_P0_4, (3U << 12) | (0xFU << 4), (2U << 12) | BIT15);
++        WpRm(WP_PADCTL, WP_PLL_P0_1, (3U << 16) | (0xFFU << 20), 0x19U << 20);
++        WpRm(WP_PADCTL, WP_PLL_P0_1, BIT0, 0);
++        WpRm(WP_PADCTL, WP_PLL_P0_1, 3U << 1, 0);
++        RamUs(20);
++        WpRm(WP_PADCTL, WP_PLL_P0_4, 0, BIT8);
++        WpRm(WP_PADCTL, WP_PLL_P0_2, 0, BIT0);
++        if (!WpWait(WP_PADCTL, WP_PLL_P0_2, BIT1, BIT1, 100000)) return FALSE;
++        WpRm(WP_PADCTL, WP_PLL_P0_2, BIT0, 0);
++        if (!WpWait(WP_PADCTL, WP_PLL_P0_2, BIT1, 0, 100000)) return FALSE;
++        WpRm(WP_PADCTL, WP_PLL_P0_1, 0, BIT3);
++        if (!WpWait(WP_PADCTL, WP_PLL_P0_1, BIT15, BIT15, 100000)) return FALSE;
++        WpRm(WP_PADCTL, WP_PLL_P0_8, 0, BIT12 | BIT13);
++        if (!WpWait(WP_PADCTL, WP_PLL_P0_8, BIT31, BIT31, 100000)) return FALSE;
++        WpRm(WP_PADCTL, WP_PLL_P0_8, BIT12, 0);
++        if (!WpWait(WP_PADCTL, WP_PLL_P0_8, BIT31, 0, 100000)) return FALSE;
++        WpRm(WP_PADCTL, WP_PLL_P0_8, BIT13, 0);
++        WpRm(WP_CAR, WP_XUSBIO_PLL, BIT2 | BIT0, BIT6 | BIT13);
++        WpRm(WP_PADCTL, WP_PLL_P0_1, BIT4, 0);
++        WpRm(WP_PADCTL, WP_PLL_P0_2, BIT2, 0);
++        WpRm(WP_PADCTL, WP_PLL_P0_8, BIT15, 0);
++        RamUs(20);
++        WpRm(WP_CAR, WP_XUSBIO_PLL, 0, BIT24);
++    }
++    // Lane 0 to PCIe (USB3_PAD_MUX[13:12] = 0) and out of IDDQ; other lanes untouched.
++    WpRm(WP_PADCTL, WP_USB3_PAD_MUX, 3U << 12, 0);
++    WpRm(WP_PADCTL, WP_USB3_PAD_MUX, 0, BIT1);
++    WpPlleHwSequence();
++    WpRm(WP_PADCTL, WP_ELPG_PROGRAM1, BIT29, 0);
++    RamUs(150);
++    WpRm(WP_PADCTL, WP_ELPG_PROGRAM1, BIT30, 0);
++    RamUs(150);
++    WpRm(WP_PADCTL, WP_ELPG_PROGRAM1, BIT31, 0);
++    return TRUE;
++}
++
++STATIC UINT32
++WpCfgRd(UINT32 Bus, UINT32 Where)
++{
++    UINT32 Off;
++
++    if (Bus == 0) return WpRd(WP_RP, Where & 0xFFC);
++    Off = ((Where & 0xF00U) << 16) | (Bus << 16) | (Where & 0xFF);
++    WpWr(WP_AFI, WP_AFI_FPCI_BAR0, 0xFE100000U + ((Off & ~0xFFFU) >> 8));
++    (VOID) WpRd(WP_AFI, WP_AFI_FPCI_BAR0);
++    return WpRd(WP_CS, Off & 0xFFC);
++}
++
++STATIC VOID
++WpCfgWr(UINT32 Bus, UINT32 Where, UINT32 V)
++{
++    UINT32 Off;
++
++    if (Bus == 0) {
++        WpWr(WP_RP, Where & 0xFFC, V);
++        return;
++    }
++    Off = ((Where & 0xF00U) << 16) | (Bus << 16) | (Where & 0xFF);
++    WpWr(WP_AFI, WP_AFI_FPCI_BAR0, 0xFE100000U + ((Off & ~0xFFFU) >> 8));
++    (VOID) WpRd(WP_AFI, WP_AFI_FPCI_BAR0);
++    WpWr(WP_CS, Off & 0xFFC, V);
++}
++
++STATIC VOID
++WpPortReset(VOID)
++{
++    WpRm(WP_AFI, WP_AFI_PEX1_CTRL, BIT0, 0);
++    WpMs(2);
++    WpRm(WP_AFI, WP_AFI_PEX1_CTRL, 0, BIT0);
++}
++
++STATIC VOID
++WpRootPortInit(VOID)
++{
++    WpRm(WP_AFI, WP_AFI_PEX1_CTRL, 0, BIT3 | BIT1 | BIT4);       // REFCLK_EN | CLKREQ_EN | OVERRIDE_EN
++    WpPortReset();
++    WpRm(WP_RP, 0xFA8, 0, BIT7);
++    WpRm(WP_RP, 0xF48, 0, BIT13);
++    WpRm(WP_RP, 0xF00, 0, BIT27 | BIT28);
++    WpRm(WP_RP, 0xF4C, 0, BIT28);
++    WpRm(WP_RP, 0xFE0, (0x7FU << 16) | (0x7FU << 24), BIT23 | BIT31 | (0xFU << 16) | (0xFU << 24));
++    WpRm(WP_RP, 0xE84, 0xFFFF, 0x0000000F);
++    WpRm(WP_RP, 0xE8C, 0xFFFFU << 16, 0x67U << 16);
++    WpWr(WP_RP, 0xE90, 0x55010000);
++    WpWr(WP_RP, 0xE94, 0x00000001);
++    WpRm(WP_RP, 0xEA4, 0xFFFF, 0x0000008F);
++    WpRm(WP_RP, 0xEAC, 0xFFFFU << 16, 0xC7U << 16);
++    WpWr(WP_RP, 0xEB0, 0x55010000);
++    WpWr(WP_RP, 0xEB4, 0x00000001);
++    WpRm(WP_RP, 0xF44, 0xFU << 12, 0x9U << 12);
++    WpRm(WP_RP, 0xF00, 0xFFU << 18, 0x01800000);
++    WpRm(WP_RP, 0x0B0, 0xF, 1);                                   // Gen1
++}
++
++STATIC BOOLEAN
++WpLink(VOID)
++{
++    UINTN Try;
++
++    WpRm(WP_RP, 0xFE0, 0xF, 0xE);
++    for (Try = 0; Try < 3; Try++) {
++        if (WpWait(WP_RP, 0xF00, BIT30, BIT30, 250000) &&
++            WpWait(WP_RP, 0x090, BIT29, BIT29, 250000)) return TRUE;
++        WpPortReset();
++    }
++    return FALSE;
++}
++
++// Endpoint off again: no decoding, radio in reset, PCIe port and controller in reset.
++STATIC VOID
++WpOff(BOOLEAN LinkUp)
++{
++    if (LinkUp) WpCfgWr(1, 0x04, 0);
++    WpGpioH(WP_H0 | WP_H1, 0, TRUE);
++    WpRm(WP_AFI, WP_AFI_PEX1_CTRL, BIT0, 0);
++    WpWr(WP_CAR, WP_RST_U_SET, WP_U_PCIEX);
++}
++
++STATIC VOID
++WifiProbe(VOID)
++{
++    UINT32 Stage = 0, V, Id = 0, Sz0, Sz2, S0, S2, A2, Window, Cmd;
++    BOOLEAN Powered = FALSE, LinkUp = FALSE, Ok = FALSE;
++
++    mWpRowCount = 0;
++    // Stage 1: T210B01 (Mariko) only.
++    Stage = 1;
++    if ((MmioRead32(0x70000804) & 0xFFF0U) != 0x2120U) goto Done;
++    // Stage 2: LDO1 1.0 V and the 32 kHz clock.
++    Stage = 2;
++    if (!WpSupply()) goto Done;
++    // Stage 3: radio held in reset, Wi-Fi pins as in the Switchroot pinmux.
++    Stage = 3;
++    WpWr(WP_PINMUX, 0x1B4, 0);
++    WpWr(WP_PINMUX, 0x1B8, 0);
++    WpWr(WP_PINMUX, 0x1BC, BIT6 | BIT4 | BIT2);
++    (VOID) WpRd(WP_PINMUX, 0x1BC);
++    // pex_l1_rst_n (0x44) and pex_l1_clkreq_n (0x48) must already be in their PE1 function.
++    WpLog((WpRd(WP_PINMUX, 0x44) << 16) | (WpRd(WP_PINMUX, 0x48) & 0xFFFF));
++    WpGpioH(WP_H0 | WP_H1, 0, TRUE);
++    Powered = TRUE;
++    WpMs(10);
++    // Stage 4: controller resets asserted, mselect clock, PCIE power partition.
++    Stage = 4;
++    WpWr(WP_CAR, WP_RST_U_SET, WP_U_PEX | WP_U_AFI | WP_U_PCIEX);
++    WpWr(WP_CAR, WP_ENB_V_SET, BIT3);
++    if (!(WpRd(WP_PMC, WP_PG_STATUS) & (1U << WP_PG_PCIE))) {
++        WpWr(WP_PMC, WP_PG_TOGGLE, BIT8 | WP_PG_PCIE);
++        if (!WpWait(WP_PMC, WP_PG_STATUS, 1U << WP_PG_PCIE, 1U << WP_PG_PCIE, 20000)) goto Done;
++        RamUs(10);
++    }
++    WpWr(WP_PMC, WP_PG_CLAMP, 1U << WP_PG_PCIE);
++    RamUs(10);
++    // Stage 5: AFI and PEX clocks, PLLE and its CML0 output.
++    Stage = 5;
++    WpWr(WP_CAR, WP_ENB_U_SET, WP_U_AFI | WP_U_PEX);
++    if (!WpPlle()) goto Done;
++    WpRm(WP_CAR, WP_PLLE_AUX, 0, BIT0);
++    RamUs(20);
++    // Stage 6: AFI setup, x4+x1 crossbar with only port 1 enabled, address windows.
++    Stage = 6;
++    WpWr(WP_CAR, WP_RST_U_CLR, WP_U_AFI);
++    RamUs(20);
++    V = WpRd(WP_AFI, WP_AFI_PLLE_CONTROL);
++    WpWr(WP_AFI, WP_AFI_PLLE_CONTROL, (V & ~BIT9) | BIT1);
++    WpWr(WP_AFI, WP_AFI_PEXBIAS, 0);
++    V = WpRd(WP_AFI, WP_AFI_PCIE_CONFIG);
++    V &= ~(0xFU << 20);
++    V |= 0xEU | (1U << 20) | (7U << 29);
++    V &= ~(1U << 2);
++    V &= ~(1U << 30);
++    WpWr(WP_AFI, WP_AFI_PCIE_CONFIG, V);
++    WpRm(WP_AFI, WP_AFI_FUSE, BIT2, 0);
++    WpRm(WP_AFI, WP_AFI_CONFIG, 0, BIT0 | BIT31);
++    WpWr(WP_AFI, WP_AFI_ERR_MASKS, 0);
++    WpWr(WP_AFI, WP_AFI_INTR_MASK, 0);
++    WpWr(WP_AFI, WP_AFI_AFI_INTR_EN, 0);
++    WpWr(WP_AFI, WP_AFI_SM_INTR_EN, 0);
++    WpWr(WP_AFI, WP_AFI_BAR0_START, WP_CS);
++    WpWr(WP_AFI, WP_AFI_BAR0_SZ, 0x10000000 >> 12);
++    WpWr(WP_AFI, WP_AFI_BAR3_START, WP_MEM_BASE);
++    WpWr(WP_AFI, WP_AFI_BAR3_SZ, WP_MEM_SIZE >> 12);
++    WpWr(WP_AFI, WP_AFI_FPCI_BAR3, (((WP_MEM_BASE >> 12) & 0x0FFFFFFF) << 4) | 1);
++    WpWr(WP_AFI, WP_AFI_BAR4_START, 0);
++    WpWr(WP_AFI, WP_AFI_BAR4_SZ, 0);
++    WpWr(WP_AFI, WP_AFI_FPCI_BAR4, 0);
++    WpWr(WP_AFI, WP_AFI_BAR5_START, 0);
++    WpWr(WP_AFI, WP_AFI_BAR5_SZ, 0);
++    WpWr(WP_AFI, WP_AFI_FPCI_BAR5, 0);
++    WpWr(WP_AFI, WP_AFI_MSI_FPCI, 0);
++    WpWr(WP_AFI, WP_AFI_MSI_BAR_SZ, 0);
++    WpWr(WP_AFI, WP_AFI_MSI_AXI, 0);
++    // Stage 7: PEX reset released, UPHY PLL and lane 0.
++    Stage = 7;
++    WpWr(WP_CAR, WP_RST_U_CLR, WP_U_PEX);
++    RamUs(20);
++    if (!WpUphy()) {
++        WpLog(WpRd(WP_PADCTL, WP_PLL_P0_1));
++        WpLog(WpRd(WP_PADCTL, WP_PLL_P0_2));
++        WpLog(WpRd(WP_PADCTL, WP_PLL_P0_8));
++        goto Done;
++    }
++    WpWr(WP_PADS, 0x0C8, 0x90B890B8);
++    // Stage 8: radio out of reset (PH0 RF_DISABLE low, PH1 high), wake pin as input.
++    Stage = 8;
++    WpGpioH(WP_H0, 0, TRUE);
++    WpMs(20);
++    WpGpioH(WP_H1, 1, TRUE);
++    WpGpioH(WP_H2, 0, FALSE);
++    WpMs(100);
++    // Stage 9: root port setup and link training.
++    Stage = 9;
++    WpRootPortInit();
++    WpWr(WP_CAR, WP_RST_U_CLR, WP_U_PCIEX);
++    WpMs(5);
++    LinkUp = WpLink();
++    WpLog(WpRd(WP_RP, 0xF00));
++    WpLog(WpRd(WP_RP, 0x090));
++    if (!LinkUp) goto Done;
++    // Stage 10: bus numbers, endpoint vendor/device ID (BCM4356 = 0x43EC14E4).
++    Stage = 10;
++    WpCfgWr(0, 0x18, 0x00010100);
++    WpCfgWr(0, 0x20, 0x0000FFF0);
++    WpCfgWr(0, 0x24, 0x0000FFF0);
++    WpCfgWr(0, 0x04, (WpCfgRd(0, 0x04) & 0xFFFF) | 0x6);
++    for (V = 0; V < 200; V++) {
++        Id = WpCfgRd(1, 0);
++        if (Id != 0xFFFFFFFF && Id != 0xFFFF0001 && (Id & 0xFFFF) != 0xFFFF && Id != 0) break;
++        WpMs(10);
++    }
++    WpLog(Id);
++    WpLog(WpRd(WP_AFI, WP_AFI_INTR_CODE));
++    if ((Id & 0xFFFF) != 0x14E4) goto Done;
++    // Stage 11: BAR0/BAR2 sizes, placed in the outbound window, memory decoding only (no DMA).
++    Stage = 11;
++    Cmd = WpCfgRd(1, 0x04) & 0xFFFF;
++    WpCfgWr(1, 0x04, Cmd & ~6U);
++    V = WpCfgRd(1, 0x10); WpCfgWr(1, 0x10, 0xFFFFFFFF); Sz0 = WpCfgRd(1, 0x10); WpCfgWr(1, 0x10, V);
++    V = WpCfgRd(1, 0x18); WpCfgWr(1, 0x18, 0xFFFFFFFF); Sz2 = WpCfgRd(1, 0x18); WpCfgWr(1, 0x18, V);
++    WpLog(Sz0);
++    WpLog(Sz2);
++    S0 = ~(Sz0 & ~0xFU) + 1;
++    S2 = ~(Sz2 & ~0xFU) + 1;
++    if (S0 == 0 || S2 == 0 || S0 > 0x100000 || S2 > 0x1000000 || (S0 & (S0 - 1)) || (S2 & (S2 - 1)) ||
++        (Sz0 & 1) || (Sz2 & 1)) goto Done;
++    A2 = (WP_MEM_BASE + S0 + S2 - 1U) & ~(S2 - 1U);
++    Window = ((A2 + S2 - 1U) & 0xFFF00000U) | ((WP_MEM_BASE >> 16) & 0xFFF0U);
++    WpCfgWr(1, 0x10, WP_MEM_BASE | (Sz0 & 0xF));
++    if ((Sz0 & 6) == 4) WpCfgWr(1, 0x14, 0);
++    WpCfgWr(1, 0x18, A2 | (Sz2 & 0xF));
++    if ((Sz2 & 6) == 4) WpCfgWr(1, 0x1C, 0);
++    WpCfgWr(0, 0x20, Window);
++    WpCfgWr(1, 0x04, (Cmd | 2U) & ~4U);
++    if ((WpCfgRd(1, 0x10) & ~0xFU) != WP_MEM_BASE || (WpCfgRd(1, 0x18) & ~0xFU) != A2 ||
++        (WpCfgRd(1, 0x04) & 6U) != 2U) goto Done;
++    // Stage 12: chip ID through the BAR0 backplane window (ChipCommon at 0x18000000).
++    Stage = 12;
++    WpCfgWr(1, 0x80, 0x18000000);
++    if (WpCfgRd(1, 0x80) != 0x18000000) goto Done;
++    V = MmioRead32(WP_MEM_BASE);
++    WpLog(V);
++    WpLog(WpRd(WP_AFI, WP_AFI_INTR_CODE));
++    Ok = (V & 0xFFFF) == 0x4356;
++    Stage = 13;
++
++Done:
++    if (Powered) WpOff(LinkUp);
++    WpDraw(Stage, Ok);
++    RamUs(20000000);
++}
++
+ // Windows has no fan driver, so run the fan at a fixed speed. This repeats
+ // what hekate does in fan_set_duty() and regulator_5v_enable().
+ #define FAN_DUTY_MAX    236
+@@ -1418,6 +1977,8 @@
+ 	StepMark(3, !EFI_ERROR(BpmpEmcRaise(1600000)));
+ 	// A failed CPU switch leaves the old clock and voltage; boot continues either way.
+ 	StepMark(9, !EFI_ERROR(CpuBoost1428()));
++	// Test builds only: power the Wi-Fi radio, read its chip ID over PCIe, power it down again.
++	WifiProbe();
+ 
+ 	Status = TegraMmcInit();
+ 	if (EFI_ERROR(Status)) goto exit;

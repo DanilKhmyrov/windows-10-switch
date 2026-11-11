@@ -29,6 +29,8 @@ for patch in /project/patches/*.patch; do
     case "$patch" in *-cleanonly.patch) [ "${CLEAN:-0}" = 1 ] || continue;; esac
     # *-win11only.patch: only for WIN11=1: UEFI that boots the Windows 11 partition.
     case "$patch" in *-win11only.patch) [ "${WIN11:-0}" = 1 ] || continue;; esac
+    # *-wifionly.patch: only for WIFI=1: Wi-Fi bring-up builds (test loaders).
+    case "$patch" in *-wifionly.patch) [ "${WIFI:-0}" = 1 ] || continue;; esac
     git -C NintendoSwitchPkg apply "$patch"
 done
 
@@ -66,5 +68,6 @@ if [ "$ARCH" = ARM ]; then OUT=NintendoSwitch-arm; else OUT=NintendoSwitch; fi
 [ "$TARGET" = RELEASE ] && OUT="$OUT-release"
 [ "${CLEAN:-0}" = 1 ] && OUT="$OUT-clean"
 [ "${WIN11:-0}" = 1 ] && OUT="$OUT-win11"
+[ "${WIFI:-0}" = 1 ] && OUT="$OUT-wifi"
 cp Build/NintendoSwitch-"$ARCH"/"$TARGET"_GCC5/FV/*.fd /project/uefi/out/"$OUT".fd
 ls -la /project/uefi/out
