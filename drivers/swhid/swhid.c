@@ -40,6 +40,7 @@
 #define PINMUX_BASE     0x70003000ULL
 #define PINMUX_SIZE     0x1000
 #define PINMUX_LCD_BL_PWM (0x1FC / 4)
+#define PINMUX_LCD_BL_EN  (0x200 / 4)
 #define GPIO_PV_CNF     (0x504 / 4)     // bank 5, port V: PV0 = LCD_BL_PWM, PV1 = LCD_BL_EN
 #define GPIO_PV_OE      (0x514 / 4)
 #define GPIO_PV_OUT     (0x524 / 4)
@@ -78,6 +79,8 @@
 #define RAW_LONG_MAX    1280
 #define RAW_SHORT_MAX   720
 #define POLL_MS         10
+#define PANEL_RETRY_POLLS 500           // panel not answering: init again every ~5 s
+#define PANEL_LOST_READS  50            // that many failed reads in a row: panel lost
 #define TIP_CONFIDENCE  3           // Tip Switch and Confidence
 
 // Windows 8+ touch screen: MAX_CONTACTS fingers (Tip, Confidence, Contact ID, X, Y),
@@ -484,17 +487,50 @@ static VOID Backlight(ULONG duty)
 // Screen off/on. With the pin still a GPIO output (hekate's state) this is hekate's own
 // display_backlight(): PV0 low/high; in PWM mode the duty goes to 0 and back. Touch is
 // dropped only while the backlight is really off.
+// LCD_BL_EN (PV1) as a GPIO output, driven high first so the backlight never blinks, and
+// out of the parked/tristate pad state so the level reaches the pin.
+static BOOLEAN BacklightEnablePin(VOID)
+{
+    if (g_gpio == NULL || g_pinmux == NULL)
+        return FALSE;
+    if (!(g_gpio[GPIO_PV_CNF] & 2u) || !(g_gpio[GPIO_PV_OE] & 2u)) {
+        LogText("backlight: enable pin, pinmux ");
+        LogHex(g_pinmux[PINMUX_LCD_BL_EN], 8);
+        g_gpio[GPIO_PV_OUT] |= 2u;
+        g_gpio[GPIO_PV_OE] |= 2u;
+        g_gpio[GPIO_PV_CNF] |= 2u;
+        g_pinmux[PINMUX_LCD_BL_EN] &= ~(PINMUX_TRISTATE | PINMUX_PARKED);
+        LogText(" -> ");
+        LogHex(g_pinmux[PINMUX_LCD_BL_EN], 8);
+        LogText("\r\n");
+    }
+    return TRUE;
+}
+
 static VOID ScreenOn(BOOLEAN on)
 {
+    // The PWM duty alone did not darken the panel (pin unparked, duty 0, screen still lit):
+    // switch the backlight enable as well, as hekate's display_end does.
+    BOOLEAN done = FALSE;
+
+    if (BacklightEnablePin()) {
+        g_gpio[GPIO_PV_OUT] = on ? (g_gpio[GPIO_PV_OUT] | 2u) : (g_gpio[GPIO_PV_OUT] & ~2u);
+        LogText(on ? "backlight: on\r\n" : "backlight: off\r\n");
+        done = TRUE;
+    }
     if (!g_pwmMode && g_gpio != NULL && (g_gpio[GPIO_PV_CNF] & 1u) && (g_gpio[GPIO_PV_OE] & 1u)) {
         g_gpio[GPIO_PV_OUT] = on ? (g_gpio[GPIO_PV_OUT] | 1u) : (g_gpio[GPIO_PV_OUT] & ~1u);
+        done = TRUE;
     } else if (BacklightPwm()) {
         g_pwm[PWM_CSR0] = PWM_ENABLE | ((on ? g_duty : 0) << 16);
-    } else {
+        done = TRUE;
+    }
+    if (!done) {
         LogText("backlight: no way to switch it\r\n");
         g_screenOff = FALSE;
         return;
     }
+    SaveLog();
     g_screenOff = !on;
 }
 
@@ -506,7 +542,12 @@ static VOID Brightness(LONG step)
         return;
     g_duty = (ULONG) (duty < BRIGHT_MIN ? BRIGHT_MIN : duty > 255 ? 255 : duty);
     g_pwm[PWM_CSR0] = PWM_ENABLE | (g_duty << 16);
-    g_screenOff = FALSE;
+    if (g_screenOff)
+        ScreenOn(TRUE);
+    LogText("backlight: duty ");
+    LogHex(g_duty, 2);
+    LogText("\r\n");
+    SaveLog();
 }
 
 // ---- Buttons -----------------------------------------------------------------------
@@ -712,21 +753,38 @@ VOID PollThread(PVOID context)
 
     UNREFERENCED_PARAMETER(context);
     delay.QuadPart = -10000LL * POLL_MS;
-    LogText(InitPanel() ? "hid: panel ok\r\n" : "hid: panel FAILED\r\n");
+    BOOLEAN panel = InitPanel();
+    ULONG failures = 0;
+    LogText(panel ? "hid: panel ok\r\n" : "hid: panel FAILED\r\n");
     StartKeys();
     SaveLog();
 
     ULONG polls = 0;
 
     while (KeWaitForSingleObject(&g_stop, Executive, KernelMode, FALSE, &delay) == STATUS_TIMEOUT) {
-        if (ReadAfterCommand(CMD_READ_ALL, events, sizeof(events))) {
+        // A panel that does not answer makes every read wait for the I2C timeout, which
+        // would slow the buttons down too: then it is only tried again every 5 s.
+        if (!panel) {
+            if (polls % PANEL_RETRY_POLLS == PANEL_RETRY_POLLS - 1) {
+                panel = InitPanel();
+                LogText(panel ? "hid: panel ok\r\n" : "hid: panel FAILED\r\n");
+                SaveLog();
+            }
+        } else if (ReadAfterCommand(CMD_READ_ALL, events, sizeof(events))) {
             g_stats[0]++;
+            failures = 0;
             for (ULONG i = 0; i < STACK_EVENTS && events[i * EVENT_SIZE] != 0; i++) {
                 g_stats[2]++;
                 UpdateContact(&events[i * EVENT_SIZE]);
             }
         } else {
             g_stats[1]++;
+            if (++failures == PANEL_LOST_READS) {
+                LogText("hid: panel lost\r\n");
+                SaveLog();
+                panel = FALSE;
+                failures = 0;
+            }
         }
         // Diagnostics: every 10 s during the first 3 minutes, one line in touch.txt.
         if (++polls % 1000 == 0 && polls <= 18000) {

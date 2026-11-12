@@ -202,7 +202,14 @@ static BOOLEAN InitPanel(VOID)
 
     // A second reset when the panel does not report ready after the first one.
     for (ULONG attempt = 0; attempt < 2 && !ready; attempt++) {
-        if (!Send(reset, sizeof(reset))) {
+        // The panel may not answer yet right after boot: a few tries, 100 ms apart.
+        BOOLEAN sent = FALSE;
+        for (ULONG t = 0; t < 5 && !sent; t++) {
+            sent = Send(reset, sizeof(reset));
+            if (!sent)
+                SleepMs(100);
+        }
+        if (!sent) {
             LogText("reset=fail\r\n");
             return FALSE;
         }
