@@ -214,12 +214,29 @@ static BOOLEAN InitPanel(VOID)
             return FALSE;
         }
         SleepMs(RESET_MS);
+        // Diagnostics: failed reads, empty reads, and the first other events (4 bytes each).
+        ULONG failed = 0, empty = 0, other = 0;
         for (ULONG i = 0; i < READY_TRIES && !ready; i++) {
-            ready = ReadAfterCommand(CMD_READ_ONE, event, EVENT_SIZE) && event[0] == EV_READY;
+            if (!ReadAfterCommand(CMD_READ_ONE, event, EVENT_SIZE)) {
+                failed++;
+            } else if (event[0] == EV_READY) {
+                ready = TRUE;
+            } else if (event[0] == 0) {
+                empty++;
+            } else if (other++ < 4) {
+                LogText("event ");
+                LogHex(((ULONG) event[0] << 24) | ((ULONG) event[1] << 16) | ((ULONG) event[2] << 8) | event[3], 8);
+                LogText("\r\n");
+            }
             if (!ready)
                 SleepMs(READY_MS);
         }
-        LogText(ready ? "ready=ok\r\n" : "ready=timeout\r\n");
+        LogText(ready ? "ready=ok" : "ready=timeout");
+        LogText(" failed/empty/other ");
+        LogHex(failed, 2);
+        LogHex(empty, 2);
+        LogHex(other, 2);
+        LogText("\r\n");
     }
 
     if (!Send(mode, sizeof(mode)) || !Send(senseOn, sizeof(senseOn)) || !Send(clear, sizeof(clear))) {

@@ -300,7 +300,7 @@ static BOOLEAN P5Write(UCHAR addr, UCHAR reg, UCHAR value)
 
 // A touch panel that stopped answering keeps that state across reboots (its 2.9 V supply, PMIC
 // LDO6, stays on). Power it off and on as hekate's touch_power_off()/touch_power_on() do: reset
-// (PJ7) low, LDO6 off for 100 ms, LDO6 on, reset high after 1 ms, then 10 ms for the panel.
+// (PJ7) low, LDO6 off for 700 ms, LDO6 on, reset high after 5 ms, then 50 ms for the panel.
 #define PMIC_LDO6_CFG    0x2F
 #define LDO_MODE_MASK    0xC0           // power mode, 3 = normal, 0 = off
 #define GPIO_PJ_CNF      (0x204 / 4)
@@ -320,13 +320,20 @@ static VOID TouchPowerCycle(VOID)
     if (pin)
         g_gpio[GPIO_PJ_OUT] &= ~PJ7;
     P5Write(PMIC_ADDR, PMIC_LDO6_CFG, (UCHAR) (cfg & ~LDO_MODE_MASK));
-    SleepMs(100);
+    // Long enough for the rail to discharge: a short dip leaves the panel half-reset.
+    SleepMs(700);
     P5Write(PMIC_ADDR, PMIC_LDO6_CFG, (UCHAR) (cfg | LDO_MODE_MASK));
-    SleepMs(1);
+    SleepMs(5);
     if (pin)
         g_gpio[GPIO_PJ_OUT] |= PJ7;
-    SleepMs(10);
-    LogText(pin ? "touch: power cycled\r\n" : "touch: power cycled (no reset pin)\r\n");
+    SleepMs(50);
+    LogText(pin ? "touch: power cycled, LDO6 " : "touch: power cycled (no reset pin), LDO6 ");
+    LogHex(cfg, 2);
+    if (P5Read(PMIC_ADDR, PMIC_LDO6_CFG, &cfg))
+        LogHex(cfg, 2);
+    if (P5Read(PMIC_ADDR, PMIC_LDO6_CFG + 1, &cfg))
+        LogHex(cfg, 2);
+    LogText("\r\n");
 }
 
 // ---- Clock -------------------------------------------------------------------------
