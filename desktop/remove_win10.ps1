@@ -10,7 +10,16 @@ $parts = Get-Partition -DiskNumber $c.DiskNumber
 "win10 removal: C: disk $($c.DiskNumber) partition $($c.PartitionNumber) offset $($c.Offset) size $($c.Size)"
 $parts | ForEach-Object { "  partition $($_.PartitionNumber) offset $($_.Offset) size $($_.Size) type $($_.Type) letter '$($_.DriveLetter)' boot $($_.IsBoot) system $($_.IsSystem)" }
 $next = $parts | Where-Object { $_.Offset -eq ($c.Offset + $c.Size) }
-if (-not $next) { 'win10 removal: no partition right after C:, nothing changed'; exit 1 }
+if (-not $next) {
+    # Already removed (Windows refuses while its page file is there, so it may have been removed
+    # from the partition table on the Mac): only grow C: over the free space after it.
+    $max = (Get-PartitionSupportedSize -DriveLetter C).SizeMax
+    if ($max -lt $c.Size + 1GB) { 'win10 removal: no partition and no free space after C:, nothing changed'; exit 1 }
+    "win10 removal: no partition after C:, growing C: from $($c.Size) to $max bytes"
+    Resize-Partition -DriveLetter C -Size $max
+    "win10 removal: done, C: is now $((Get-Partition -DriveLetter C).Size) bytes"
+    exit 0
+}
 $fs = (Get-Volume -Partition $next -ErrorAction SilentlyContinue).FileSystem
 if ($next.PartitionNumber -eq $c.PartitionNumber -or $next.IsBoot -or $next.IsSystem -or
         $next.DriveLetter -eq 'C' -or $fs -ne 'NTFS' -or $next.Size -lt 20GB -or $next.Size -gt 30GB) {
