@@ -1,7 +1,7 @@
 diff --git a/AcpiTables/Dsdt/Dsdt.asl b/AcpiTables/Dsdt/Dsdt.asl
 --- a/AcpiTables/Dsdt/Dsdt.asl
 +++ b/AcpiTables/Dsdt/Dsdt.asl
-@@ -326,6 +326,38 @@
+@@ -326,6 +326,41 @@
              Method (_STA, 0, NotSerialized)
              {
                  Return (\_SB.XHC0._STA ())
@@ -11,8 +11,10 @@ diff --git a/AcpiTables/Dsdt/Dsdt.asl b/AcpiTables/Dsdt/Dsdt.asl
 +
 +        // GM20B GPU for the experimental mesa-switch-woa render driver (test builds, GPUTEST=1):
 +        // the resources of its platform/t214_resources.h (T214_GPU_*), render only: no POST
-+        // framebuffer and no display controller (those stay with the firmware framebuffer), no
-+        // LIC routing. The GPU stays in reset and clamped; the driver powers it through swbatt.
++        // framebuffer and no display controller (those stay with the firmware framebuffer). The
++        // driver requires the LIC window (its SWITCH_LITE_GPU_IRQ resource) and routes the
++        // nonstall interrupt itself. The GPU stays in reset and clamped; the driver powers it
++        // through swbatt.
 +        Device (GPU0)
 +        {
 +            Name (_HID, "SWOA0F01")
@@ -31,6 +33,7 @@ diff --git a/AcpiTables/Dsdt/Dsdt.asl b/AcpiTables/Dsdt/Dsdt.asl
 +                Memory32Fixed (ReadOnly, 0x70000804, 0x00000004)    // HIDREV
 +                Memory32Fixed (ReadOnly, 0x7000F930, 0x00000004)    // fuses
 +                Memory32Fixed (ReadOnly, 0x7000FB04, 0x00000004)
++                Memory32Fixed (ReadWrite, 0x60004414, 0x0000001C)   // LIC bank 4: nonstall SPI 158 to the CPU
 +                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 189 }  // stall
 +                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 190 }  // nonstall
 +            })
