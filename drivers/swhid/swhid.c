@@ -298,6 +298,37 @@ static BOOLEAN P5Write(UCHAR addr, UCHAR reg, UCHAR value)
     return P5Xfer(addr, FALSE, &data, 2);
 }
 
+// A touch panel that stopped answering keeps that state across reboots (its 2.9 V supply, PMIC
+// LDO6, stays on). Power it off and on as hekate's touch_power_off()/touch_power_on() do: reset
+// (PJ7) low, LDO6 off for 100 ms, LDO6 on, reset high after 1 ms, then 10 ms for the panel.
+#define PMIC_LDO6_CFG    0x2F
+#define LDO_MODE_MASK    0xC0           // power mode, 3 = normal, 0 = off
+#define GPIO_PJ_CNF      (0x204 / 4)
+#define GPIO_PJ_OE       (0x214 / 4)
+#define GPIO_PJ_OUT      (0x224 / 4)
+#define PJ7              (1u << 7)      // touch reset, low = in reset
+
+static VOID TouchPowerCycle(VOID)
+{
+    UCHAR cfg;
+    BOOLEAN pin = g_gpio != NULL && (g_gpio[GPIO_PJ_CNF] & PJ7) && (g_gpio[GPIO_PJ_OE] & PJ7);
+
+    if (g_i2c5 == NULL || !P5Read(PMIC_ADDR, PMIC_LDO6_CFG, &cfg)) {
+        LogText("touch: no PMIC access, no power cycle\r\n");
+        return;
+    }
+    if (pin)
+        g_gpio[GPIO_PJ_OUT] &= ~PJ7;
+    P5Write(PMIC_ADDR, PMIC_LDO6_CFG, (UCHAR) (cfg & ~LDO_MODE_MASK));
+    SleepMs(100);
+    P5Write(PMIC_ADDR, PMIC_LDO6_CFG, (UCHAR) (cfg | LDO_MODE_MASK));
+    SleepMs(1);
+    if (pin)
+        g_gpio[GPIO_PJ_OUT] |= PJ7;
+    SleepMs(10);
+    LogText(pin ? "touch: power cycled\r\n" : "touch: power cycled (no reset pin)\r\n");
+}
+
 // ---- Clock -------------------------------------------------------------------------
 
 static LONGLONG DaysFromCivil(LONG y, ULONG m, ULONG d)
@@ -798,6 +829,7 @@ VOID PollThread(PVOID context)
             // Ten quick tries (5 s apart), then one a minute: each costs the buttons about a second.
             if (polls % (tries < 10 ? PANEL_RETRY_POLLS : 12 * PANEL_RETRY_POLLS) == PANEL_RETRY_POLLS - 1) {
                 tries++;
+                TouchPowerCycle();
                 panel = InitPanel();
                 LogText(panel ? "hid: panel ok\r\n" : "hid: panel FAILED\r\n");
                 SaveLog();
