@@ -303,6 +303,8 @@ static BOOLEAN P5Write(UCHAR addr, UCHAR reg, UCHAR value)
 // (PJ7) low, LDO6 off for 700 ms, LDO6 on, reset high after 5 ms, then 50 ms for the panel.
 #define PMIC_LDO6_CFG    0x2F
 #define LDO_MODE_MASK    0xC0           // power mode, 3 = normal, 0 = off
+#define LDO_VOLT_MASK    0x3F
+#define LDO6_2V9         0x2A           // (2.9 V - 0.8 V) / 50 mV: "vdd-tp-2v9" in Switchroot
 #define GPIO_PJ_CNF      (0x204 / 4)
 #define GPIO_PJ_OE       (0x214 / 4)
 #define GPIO_PJ_OUT      (0x224 / 4)
@@ -319,10 +321,12 @@ static VOID TouchPowerCycle(VOID)
     }
     if (pin)
         g_gpio[GPIO_PJ_OUT] &= ~PJ7;
-    P5Write(PMIC_ADDR, PMIC_LDO6_CFG, (UCHAR) (cfg & ~LDO_MODE_MASK));
+    // Off, and at 2.9 V when it comes back: it was found at 1.0 V (0x04), where the panel answers
+    // on I2C but senses nothing.
+    P5Write(PMIC_ADDR, PMIC_LDO6_CFG, LDO6_2V9);
     // Long enough for the rail to discharge: a short dip leaves the panel half-reset.
     SleepMs(700);
-    P5Write(PMIC_ADDR, PMIC_LDO6_CFG, (UCHAR) (cfg | LDO_MODE_MASK));
+    P5Write(PMIC_ADDR, PMIC_LDO6_CFG, LDO_MODE_MASK | LDO6_2V9);
     SleepMs(5);
     if (pin)
         g_gpio[GPIO_PJ_OUT] |= PJ7;
@@ -821,10 +825,19 @@ VOID PollThread(PVOID context)
 
     UNREFERENCED_PARAMETER(context);
     delay.QuadPart = -10000LL * POLL_MS;
+    UCHAR ldo6 = 0;
+    StartKeys();
+    // The touch supply must be 2.9 V before the panel is started.
+    if (g_i2c5 != NULL && P5Read(PMIC_ADDR, PMIC_LDO6_CFG, &ldo6) &&
+            ldo6 != (LDO_MODE_MASK | LDO6_2V9)) {
+        LogText("touch: LDO6 was ");
+        LogHex(ldo6, 2);
+        LogText("\r\n");
+        TouchPowerCycle();
+    }
     BOOLEAN panel = InitPanel();
     ULONG failures = 0, tries = 1;
     LogText(panel ? "hid: panel ok\r\n" : "hid: panel FAILED\r\n");
-    StartKeys();
     SaveLog();
 
     ULONG polls = 0;

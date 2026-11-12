@@ -90,6 +90,17 @@ NTSYSAPI NTSTATUS NTAPI ZwInitiatePowerAction(POWER_ACTION SystemAction,
 #define R_CMD_DATA1     (0x0C / 4)
 #define R_STATUS        (0x1C / 4)
 #define R_CONFIG_LOAD   (0x8C / 4)
+#define R_TX_FIFO       (0x50 / 4)
+#define R_RX_FIFO       (0x54 / 4)
+#define R_PKT_STATUS    (0x58 / 4)
+#define R_FIFO_CONTROL  (0x5C / 4)
+#define R_FIFO_STATUS   (0x60 / 4)
+#define PACKET_GO       (1 << 10)
+#define FIFO_FLUSH      3
+#define RX_FIFO_COUNT   0xF
+#define PROT_I2C        (1 << 4)
+#define HDR_REP_START   (1 << 16)
+#define HDR_READ        (1 << 19)
 #define ADDR0_READ      1
 #define CMD1_READ       (1 << 6)
 #define NORMAL_GO       (1 << 9)
@@ -477,12 +488,40 @@ static VOID LogHex4(ULONG value)
     LogText(text);
 }
 
+// The BM92T needs a repeated start between the register write and the read (a stop resets its
+// register pointer and the read returns zeros): packet mode, as the touch driver and hekate do.
 static BOOLEAN PdRead(UCHAR reg, ULONG *value)
 {
-    if (!ReadReg(ADDR_PD, reg, 2, value))
-        return FALSE;
-    *value &= 0xFFFF;
-    return TRUE;
+    ULONG addr = ADDR_PD << 1, poll;
+    BOOLEAN ok = FALSE;
+
+    g_i2c[R_CMD_ADDR0] = addr | ADDR0_READ;
+    g_i2c[R_CNFG] = DEBOUNCE_4T | NEW_MASTER_FSM | CMD1_READ;
+    g_i2c[R_FIFO_CONTROL] = FIFO_FLUSH;
+    LoadConfig();
+    g_i2c[R_CNFG] = (g_i2c[R_CNFG] & ~NORMAL_GO) | PACKET_GO;
+    g_i2c[R_TX_FIFO] = PROT_I2C;
+    g_i2c[R_TX_FIFO] = 0;
+    g_i2c[R_TX_FIFO] = HDR_REP_START | addr;
+    g_i2c[R_TX_FIFO] = reg;
+    g_i2c[R_TX_FIFO] = PROT_I2C;
+    g_i2c[R_TX_FIFO] = 1;                       // two bytes
+    g_i2c[R_TX_FIFO] = HDR_READ | addr;
+    for (poll = 0; poll < POLL_LIMIT; poll++) {
+        if (g_i2c[R_STATUS] & STATUS_NOACK)
+            break;
+        if (g_i2c[R_FIFO_STATUS] & RX_FIFO_COUNT) {
+            *value = g_i2c[R_RX_FIFO] & 0xFFFF;
+            ok = TRUE;
+            break;
+        }
+        KeStallExecutionProcessor(POLL_US);
+    }
+    if (g_i2c[R_STATUS] & STATUS_NOACK)
+        ok = FALSE;
+    KeStallExecutionProcessor(20);
+    g_i2c[R_CNFG] &= ~(PACKET_GO | NORMAL_GO);
+    return ok;
 }
 
 static BOOLEAN PdWrite(UCHAR reg, ULONG value)
