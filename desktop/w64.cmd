@@ -22,6 +22,10 @@ powercfg /change disk-timeout-dc 0 >> %LOG% 2>&1
 powercfg /hibernate off >> %LOG% 2>&1
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance" /v MaintenanceDisabled /t REG_DWORD /d 1 /f >> %LOG% 2>&1
 reg add HKLM\SYSTEM\CurrentControlSet\Control\CrashControl /v CrashDumpEnabled /t REG_DWORD /d 3 /f >> %LOG% 2>&1
+rem Passwords never expire: once Wi-Fi syncs the clock (2022 -> today), the empty password of
+rem Player set during setup would count as years old and Windows would force a change.
+net accounts /maxpwage:unlimited >> %LOG% 2>&1
+powershell -NoProfile -Command "Get-LocalUser | Where-Object Enabled | Set-LocalUser -PasswordNeverExpires $true" >> %LOG% 2>&1
 call :onedrive
 call :wifi %1
 
