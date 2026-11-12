@@ -7,7 +7,8 @@
 //   TMP451   (0x4C): SoC and board temperature.
 // Windows sees a regular battery: tray icon with percent, "charging", remaining time,
 // and shuts itself down at BATTERY_CRITICAL (the action is set by powercfg in w32.cmd).
-// Fan: 50% up to FAN_LOW_C (45 C), then linear to 100% at FAN_HIGH_C (65 C); 100% if the
+// Fan: off below FAN_STOP_C (40 C) until it is FAN_LOW_C (45 C) again (hysteresis), as Horizon
+// keeps it quiet when cool; 50% up to FAN_LOW_C, then linear to 100% at FAN_HIGH_C (65 C); 100% if the
 // temperature cannot be read. At SHUTDOWN_C and above the system is shut down.
 // I2C1 is set up by UEFI (PmicDxe); no other Windows driver uses it.
 // Headphone jack: every JACK_MS it also reads PV6 (the jack switch, low = plugged, Switchroot's
@@ -71,6 +72,7 @@ NTSYSAPI NTSTATUS NTAPI ZwInitiatePowerAction(POWER_ACTION SystemAction,
 #define CRITICAL_PCT    3
 #define FAN_MIN_PCT     50
 #define FAN_LOW_C       45
+#define FAN_STOP_C      40
 #define FAN_HIGH_C      65
 #define SHUTDOWN_C      85
 #define READ_FAIL_FAN   3
@@ -264,12 +266,21 @@ static VOID SetFan(ULONG percent)
 {
     ULONG duty = percent * FAN_DUTY_MAX / 100;
 
-    // PWM polarity is inverted, as in UEFI (FanStart).
-    g_pwm[PWM_FAN_CSR] = PWM_ENABLE | ((FAN_DUTY_MAX - duty) << 16);
+    // PWM polarity is inverted, as in UEFI (FanStart). 0%: bit 24, "absolute 0%" in hekate's
+    // fan_set_duty (the 5 V fan supply stays on, so the fan can start again at once).
+    g_pwm[PWM_FAN_CSR] = PWM_ENABLE | ((percent == 0 ? 0x100 : FAN_DUTY_MAX - duty) << 16);
 }
 
 static ULONG FanForTemp(LONG socC)
 {
+    static BOOLEAN stopped;
+
+    if (socC < FAN_STOP_C)
+        stopped = TRUE;
+    else if (socC >= FAN_LOW_C)
+        stopped = FALSE;
+    if (stopped)
+        return 0;
     if (socC <= FAN_LOW_C)
         return FAN_MIN_PCT;
     if (socC >= FAN_HIGH_C)
