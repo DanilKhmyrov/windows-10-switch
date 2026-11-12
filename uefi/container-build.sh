@@ -29,6 +29,8 @@ for patch in /project/patches/*.patch; do
     case "$patch" in *-cleanonly.patch) [ "${CLEAN:-0}" = 1 ] || continue;; esac
     # *-win11only.patch: only for WIN11=1: UEFI that boots the Windows 11 partition and prepares Wi-Fi.
     case "$patch" in *-win11only.patch) [ "${WIN11:-0}" = 1 ] || continue;; esac
+    # *-gputestonly.patch: only for GPUTEST=1: test loader with the GPU power check (Windows 11 builds).
+    case "$patch" in *-gputestonly.patch) [ "${GPUTEST:-0}" = 1 ] || continue;; esac
     git -C NintendoSwitchPkg apply "$patch"
 done
 
