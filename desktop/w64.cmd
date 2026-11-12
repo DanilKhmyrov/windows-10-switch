@@ -158,10 +158,11 @@ reg add "%~1\Software\Microsoft\TabletTip\1.7" /v TipbandDesiredVisibility /t RE
 goto :eof
 
 rem Wi-Fi (Windows 11 only; the device ACPI\SWOA0D01 exists only with a Wi-Fi UEFI build).
-rem Package on the boot partition in agent\wifi: switchwifi.sys/.inf, the board firmware, the
-rem test certificates (wifi-root.cer: root, wifi.cer/wifi.pfx: signer), wifi_sign.ps1 and Inf2Cat from the WDK (inf2cat\).
-rem The catalog is made and signed here, then the package is installed with pnputil once per
-rem driver build (marker: the staged copy in C:\swagent\wifi plus installed.ok).
+rem Package on the boot partition in agent\wifi: switchwifi.sys/.inf, the board firmware,
+rem wifi_sign.ps1 and Inf2Cat from the WDK (inf2cat\). The catalog is made here and signed with
+rem test certificates the console makes for itself (wifi_sign.ps1), then the package is installed
+rem with pnputil once per driver build (marker: the staged copy in C:\swagent\wifi plus
+rem installed-local.ok).
 :wifi
 if not exist %1:\agent\wifi\switchwifi.inf goto :eof
 ver | find "10.0.22" >nul || goto :eof
@@ -171,26 +172,28 @@ set FW=C:\Windows\System32\drivers\SwitchWOA
 if not exist %FW% mkdir %FW%
 copy /y %1:\agent\wifi\brcmfmac4356A3-pcie.bin %FW%\ >> %LOG% 2>&1
 copy /y %1:\agent\wifi\brcmfmac4356A3-pcie.txt %FW%\ >> %LOG% 2>&1
-if exist %WD%\installed.ok fc /b %1:\agent\wifi\switchwifi.sys %WD%\switchwifi.sys >nul 2>&1 && goto :wifireport
+if exist %WD%\installed-local.ok fc /b %1:\agent\wifi\switchwifi.sys %WD%\switchwifi.sys >nul 2>&1 && goto :wifireport
 if exist %WD% rmdir /s /q %WD%
 mkdir %WD%
 copy /y %1:\agent\wifi\switchwifi.inf %WD%\ >> %LOG% 2>&1
 copy /y %1:\agent\wifi\switchwifi.sys %WD%\ >> %LOG% 2>&1
-certutil -addstore -f Root %1:\agent\wifi\wifi-root.cer >> %LOG% 2>&1
-certutil -addstore -f TrustedPublisher %1:\agent\wifi\wifi.cer >> %LOG% 2>&1
+rem Certificates of the first test builds (made on the Mac) are no longer trusted.
+certutil -delstore Root "Switch Windows Test Root" >> %LOG% 2>&1
+certutil -delstore Root "Switch Windows Test Driver" >> %LOG% 2>&1
+certutil -delstore TrustedPublisher "Switch Windows Test Driver" >> %LOG% 2>&1
 %1:\agent\wifi\inf2cat\Inf2Cat.exe /driver:%WD% /os:10_NI_ARM64 >> %LOG% 2>&1
 if not exist %WD%\switchwifi.cat (
   echo -- wifi: no catalog >> %LOG%
   goto :eof
 )
-powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\wifi\wifi_sign.ps1 %WD%\switchwifi.cat %1:\agent\wifi\wifi.pfx >> %LOG% 2>&1 || (
+powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\wifi\wifi_sign.ps1 %WD%\switchwifi.cat >> %LOG% 2>&1 || (
   echo -- wifi: catalog not signed >> %LOG%
   goto :eof
 )
 pnputil /add-driver %WD%\switchwifi.inf /install >> %LOG% 2>&1
 echo pnputil exit %errorlevel% >> %LOG%
-if %errorlevel% equ 0 echo ok > %WD%\installed.ok
-if %errorlevel% equ 3010 echo ok > %WD%\installed.ok
+if %errorlevel% equ 0 echo ok > %WD%\installed-local.ok
+if %errorlevel% equ 3010 echo ok > %WD%\installed-local.ok
 :wifireport
 reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWOA0D01" /s >> %LOG% 2>&1
 sc query switchwifi >> %LOG% 2>&1

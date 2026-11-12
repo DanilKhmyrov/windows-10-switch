@@ -220,18 +220,20 @@ What this repository adds:
   `Microsoft.Windows.SDK.CPP`) and test-signs it.
 - **Install**: `w64.cmd` copies the board firmware to `System32\drivers\SwitchWOA`, makes the
   catalog with the WDK's Inf2Cat on the console, signs it with PowerShell and runs `pnputil`.
+  The signing certificates are made on the console itself (`wifi_sign.ps1`: a test root and a
+  code-signing certificate issued by it, non-exportable keys), so no signing key is shipped.
 
 Put on the boot partition in `agent\wifi\`: `switchwifi.sys`, `switchwifi.inf`,
-`wifi-root.cer`, `wifi.cer`, `wifi.pfx`, `wifi_sign.ps1`, the WDK's `bin\10.0.26100.0\x86\`
+`wifi_sign.ps1`, the WDK's `bin\10.0.26100.0\x86\`
 folder as `inf2cat\`, and the firmware `brcmfmac4356A3-pcie.bin` / `brcmfmac4356A3-pcie.txt`.
 The firmware is not in this repository (Cypress license): the `.bin` is in
 [CTCaer/switch-l4t-kernel-4.9](https://github.com/CTCaer/switch-l4t-kernel-4.9)
 (`firmware/brcm/brcmfmac4356A3-pcie.bin.ihex`, convert it from Intel HEX), the `.txt` in
 Switchroot's `nx-firmware`. Set a random locally administered `macaddr=` in the `.txt`: the
 shipped one is the same for every console.
-The private keys are not published: make your own test root and a CA:FALSE code-signing
-certificate issued by it (both valid from before 2022), save them as `drivers/test-cert/wifi-root.*`
-and `wifi.*`, and pack `wifi.pfx` with the password `switch`.
+`build_wifi.sh` test-signs `switchwifi.sys` with `drivers/test-cert/wifi.key`, which is not
+published: to rebuild, make your own test root and CA:FALSE code-signing certificate (valid from
+before 2022) under the same names. Windows in test-signing mode loads it either way.
 
 
 ## SD card layout (MBR)
