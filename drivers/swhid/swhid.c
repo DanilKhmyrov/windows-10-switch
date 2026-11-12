@@ -47,6 +47,9 @@
 #define CAR_BASE        0x60006000ULL
 #define CAR_CLK_OUT_ENB_L (0x010 / 4)
 #define CLK_L_PWM       (1u << 17)
+#define CAR_RST_DEV_L   (0x004 / 4)
+#define PINMUX_TRISTATE (1u << 4)
+#define PINMUX_PARKED   (1u << 5)        // reset state: the pin does not follow its function
 #define POWER_EVERY     5                // read the power button every 5 polls (50 ms)
 #define POWER_HOLD_MS   4000
 #define BRIGHT_STEP     16
@@ -429,9 +432,10 @@ static VOID ClockLearn(VOID)
 
 // ---- Backlight ---------------------------------------------------------------------
 
-// hekate leaves the backlight pin LCD_BL_PWM (PV0) as a GPIO driven high (full brightness) and
-// only switches it to PWM0 in its own menu (display_backlight_pwm_init). Do the same once, the
-// first time the backlight changes: duty first, then the pin function, then GPIO -> SFIO.
+// The backlight pin LCD_BL_PWM (PV0) is found either as a GPIO driven high or with function
+// PWM0 but still parked (pinmux 0x21: the pin ignores the PWM and the panel stays at full
+// brightness). The first time the backlight changes it becomes a real PWM0 output, as in
+// hekate's display_backlight_pwm_init: duty first, then the pin function, then GPIO -> SFIO.
 static BOOLEAN BacklightPwm(VOID)
 {
     PHYSICAL_ADDRESS address;
@@ -448,18 +452,26 @@ static BOOLEAN BacklightPwm(VOID)
     car = MmMapIoSpace(address, 0x100, MmNonCached);
     if (car == NULL)
         return FALSE;
-    clock = (car[CAR_CLK_OUT_ENB_L] & CLK_L_PWM) != 0;
+    clock = (car[CAR_CLK_OUT_ENB_L] & CLK_L_PWM) != 0 && !(car[CAR_RST_DEV_L] & CLK_L_PWM);
     MmUnmapIoSpace((PVOID) car, 0x100);
     if (!clock) {
         LogText("backlight: PWM clock off, left alone\r\n");
         return FALSE;
     }
-    // The screen may be off (PV0 low) at this moment: then start the PWM at 0.
+    // Duty first, and only if the PWM really takes it (else the pin would go low for good).
     g_pwm[PWM_CSR0] = PWM_ENABLE | ((g_screenOff ? 0 : g_duty) << 16);
-    g_pinmux[PINMUX_LCD_BL_PWM] = (g_pinmux[PINMUX_LCD_BL_PWM] & ~3u) | 1;
+    if (g_pwm[PWM_CSR0] != (PWM_ENABLE | ((g_screenOff ? 0 : g_duty) << 16))) {
+        LogText("backlight: PWM does not take the duty, left alone\r\n");
+        return FALSE;
+    }
+    // Function PWM0, driven (not tristate) and out of the parked reset state.
+    g_pinmux[PINMUX_LCD_BL_PWM] =
+        (g_pinmux[PINMUX_LCD_BL_PWM] & ~(3u | PINMUX_TRISTATE | PINMUX_PARKED)) | 1;
     g_gpio[GPIO_PV_CNF] &= ~1u;
     g_pwmMode = TRUE;
-    LogText("backlight: PWM mode\r\n");
+    LogText("backlight: PWM mode, pinmux ");
+    LogHex(g_pinmux[PINMUX_LCD_BL_PWM], 8);
+    LogText("\r\n");
     return TRUE;
 }
 
@@ -474,10 +486,10 @@ static VOID Backlight(ULONG duty)
 // dropped only while the backlight is really off.
 static VOID ScreenOn(BOOLEAN on)
 {
-    if (g_pwmMode && g_pwm != NULL) {
-        g_pwm[PWM_CSR0] = PWM_ENABLE | ((on ? g_duty : 0) << 16);
-    } else if (g_gpio != NULL && (g_gpio[GPIO_PV_CNF] & 1u) && (g_gpio[GPIO_PV_OE] & 1u)) {
+    if (!g_pwmMode && g_gpio != NULL && (g_gpio[GPIO_PV_CNF] & 1u) && (g_gpio[GPIO_PV_OE] & 1u)) {
         g_gpio[GPIO_PV_OUT] = on ? (g_gpio[GPIO_PV_OUT] | 1u) : (g_gpio[GPIO_PV_OUT] & ~1u);
+    } else if (BacklightPwm()) {
+        g_pwm[PWM_CSR0] = PWM_ENABLE | ((on ? g_duty : 0) << 16);
     } else {
         LogText("backlight: no way to switch it\r\n");
         g_screenOff = FALSE;
@@ -505,6 +517,7 @@ static VOID PollKeys(ULONG polls)
 {
     static UCHAR last, stable, sent;
     static ULONG heldMs, powerMs;
+    static ULONGLONG powerStart;
     static BOOLEAN power, combo, powerSent;
     ULONG in;
     UCHAR now;
@@ -520,11 +533,13 @@ static VOID PollKeys(ULONG polls)
             power = (status & PMIC_EN0) != 0;
     }
     if (power) {
+        // Real time: a 10 ms wait lasts a whole timer tick (15.6 ms or more) in Windows.
         if (powerMs == 0) {
+            powerStart = KeQueryInterruptTime();
             LogText("power: down\r\n");
             SaveLog();
         }
-        powerMs += POLL_MS;
+        powerMs = (ULONG) ((KeQueryInterruptTime() - powerStart) / 10000) + 1;
         if (!combo && !powerSent && powerMs >= POWER_HOLD_MS) {
             QueueReport(REPORT_ID_SAS, 1);
             g_sasRelease = SAS_HOLD_POLLS;
@@ -602,7 +617,9 @@ static VOID StartKeys(VOID)
     g_pinmux = MmMapIoSpace(address, PINMUX_SIZE, MmNonCached);
     if (g_pwm != NULL && g_pinmux != NULL) {
         // Already PWM (hekate's menu ran): keep its duty; GPIO mode means full brightness.
-        g_pwmMode = (g_pinmux[PINMUX_LCD_BL_PWM] & 3u) == 1 && !(g_gpio[GPIO_PV_CNF] & 1u);
+        // A parked or tristate pin (the reset state) does not follow the PWM at all.
+        g_pwmMode = (g_pinmux[PINMUX_LCD_BL_PWM] & (3u | PINMUX_TRISTATE | PINMUX_PARKED)) == 1 &&
+            !(g_gpio[GPIO_PV_CNF] & 1u);
         g_duty = g_pwmMode ? (g_pwm[PWM_CSR0] >> 16) & 0xFF : 255;
         if (g_duty < BRIGHT_MIN)
             g_duty = 150;
