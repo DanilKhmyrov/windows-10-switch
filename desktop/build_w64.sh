@@ -29,6 +29,7 @@ cp "$HERE/boot64.cmd" "$MNT/swagent/boot.cmd"
 cp "$HERE/setup64.cmd" "$MNT/swagent/setup.cmd"
 cp "$HERE/findagent64.cmd" "$MNT/swagent/findagent.cmd"
 cp "$HERE/copylogs.cmd" "$MNT/swagent/copylogs.cmd"
+cp "$HERE/setupwatch.cmd" "$MNT/swagent/setupwatch.cmd"
 
 # Specialize steps that cannot work here (see below).
 python3 - "$MNT/Windows/System32/Sysprep/ActionFiles/Specialize.xml" <<'PY'

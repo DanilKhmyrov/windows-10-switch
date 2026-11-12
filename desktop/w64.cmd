@@ -20,6 +20,11 @@ powercfg /change standby-timeout-dc 0 >> %LOG% 2>&1
 powercfg /change disk-timeout-ac 0 >> %LOG% 2>&1
 powercfg /change disk-timeout-dc 0 >> %LOG% 2>&1
 powercfg /hibernate off >> %LOG% 2>&1
+rem Power button held 2 s (swhid sends System Power Down): shut down. A short press only
+rem switches the backlight, inside swhid.
+powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 3 >> %LOG% 2>&1
+powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 3 >> %LOG% 2>&1
+powercfg /setactive SCHEME_CURRENT >> %LOG% 2>&1
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance" /v MaintenanceDisabled /t REG_DWORD /d 1 /f >> %LOG% 2>&1
 reg add HKLM\SYSTEM\CurrentControlSet\Control\CrashControl /v CrashDumpEnabled /t REG_DWORD /d 3 /f >> %LOG% 2>&1
 rem Passwords never expire: once Wi-Fi syncs the clock (2022 -> today), the empty password of

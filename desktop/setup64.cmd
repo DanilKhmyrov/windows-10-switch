@@ -7,6 +7,7 @@ mkdir %L% 2>nul
 echo ==== SETUP %date% %time% >> %L%\setup.txt
 reg query HKLM\SYSTEM\Setup >> %L%\setup.txt 2>&1
 start "" /b C:\Windows\System32\cmd.exe /c C:\swagent\copylogs.cmd %L%
+start "" /b C:\Windows\System32\cmd.exe /c C:\swagent\setupwatch.cmd %L%
 C:\Windows\System32\oobe\windeploy.exe
 echo windeploy exit %errorlevel% %time% >> %L%\setup.txt
 reg query HKLM\SYSTEM\Setup >> %L%\setup.txt 2>&1

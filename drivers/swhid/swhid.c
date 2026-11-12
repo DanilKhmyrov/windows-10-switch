@@ -6,6 +6,14 @@
 // The volume buttons (PX6 = up, PX7 = down, low = pressed, as Switchroot's nx-keys) are read on
 // the same poll and reported as a second top-level collection, Consumer Control (Volume
 // Increment / Decrement), so Windows changes the volume and shows its volume flyout.
+// The power button (MAX77620 ONOFFSTAT EN0 on I2C5) is polled too:
+//   short press: backlight off/on (PWM channel 0, as hekate); touch is ignored while it is off;
+//   held 2 s: System Power Down (a third collection), Windows runs its power button action;
+//   held with volume up/down: backlight brighter/darker, no volume change.
+// Clock: the MAX77620 RTC (I2C5, 0x68) keeps running while the console is off. Once Windows
+// has a real time (after NTP), the offset between it and the RTC is kept in
+// Services\swhid\Parameters\RtcOffset; at every start the system time is set to RTC + offset.
+// The RTC itself is never written (Horizon uses it).
 #define TOUCHREAD_CORE_ONLY
 #include "../touchread/touchread.c"
 #include <hidport.h>
@@ -16,6 +24,24 @@
 #define REPORT_ID_TOUCH 1
 #define REPORT_ID_MAX   2
 #define REPORT_ID_KEYS  3
+#define REPORT_ID_POWER 4
+#define I2C5_BASE       0x7000D000ULL
+#define I2C5_SIZE       0x100
+#define PMIC_ADDR       0x3C
+#define PMIC_ONOFFSTAT  0x15
+#define PMIC_EN0        (1u << 2)       // power button pressed
+#define RTC_ADDR        0x68
+#define PWM_BASE        0x7000A000ULL
+#define PWM_SIZE        0x100
+#define PWM_CSR0        0                // backlight
+#define PWM_ENABLE      0x80000000u
+#define POWER_EVERY     5                // read the power button every 5 polls (50 ms)
+#define POWER_HOLD_MS   2000
+#define BRIGHT_STEP     16
+#define BRIGHT_MIN      8
+#define CLOCK_EVERY     6000             // learn the RTC offset every 60 s
+#define UNIX_1601       116444736000000000LL
+#define PLAUSIBLE_UNIX  1735689600LL     // 2025-01-01: Windows' time is real, not UEFI's 2022
 #define KEY_REPORT_SIZE 2
 #define KEY_QUEUE       8
 #define GPIO_BASE       0x6000D000ULL
@@ -66,8 +92,16 @@ static const UCHAR g_reportDescriptor[] = {
     0x85, REPORT_ID_KEYS, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x02,
     0x09, 0xE9, 0x09, 0xEA, 0x81, 0x02,
     0x95, 0x06, 0x81, 0x03,
+    0xC0,
+    // System Control: bit 0 System Power Down.
+    0x05, 0x01, 0x09, 0x80, 0xA1, 0x01,
+    0x85, REPORT_ID_POWER, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01,
+    0x09, 0x81, 0x81, 0x02,
+    0x95, 0x07, 0x81, 0x03,
     0xC0
 };
+
+NTSYSAPI NTSTATUS NTAPI ZwSetSystemTime(PLARGE_INTEGER SystemTime, PLARGE_INTEGER PreviousTime);
 
 static HID_DESCRIPTOR g_hidDescriptor = {
     sizeof(HID_DESCRIPTOR), HID_HID_DESCRIPTOR_TYPE, 0x0111, 0, 1,
@@ -83,6 +117,11 @@ static LONG g_dirty;
 static volatile ULONG *g_gpio;
 static ULONG g_stats[5];                 // panel reads ok, read failures, events, touch reports, key reports
 static UCHAR g_keyQueue[KEY_QUEUE];      // pending key states, sent before touch reports
+static UCHAR g_keyIds[KEY_QUEUE];
+static volatile ULONG *g_i2c5;
+static volatile ULONG *g_pwm;
+static BOOLEAN g_screenOff;
+static ULONG g_duty;                     // backlight duty 0..255 while the screen is on
 static ULONG g_keyHead, g_keyCount;      // used by the poll thread only
 
 static PDEVICE_OBJECT NextDevice(PDEVICE_OBJECT device)
@@ -124,12 +163,18 @@ static PIRP PopRead(VOID)
     return irp;
 }
 
-static VOID QueueKeys(UCHAR state)
+static VOID QueueReport(UCHAR id, UCHAR state)
 {
     if (g_keyCount < KEY_QUEUE) {
+        g_keyIds[(g_keyHead + g_keyCount) % KEY_QUEUE] = id;
         g_keyQueue[(g_keyHead + g_keyCount) % KEY_QUEUE] = state;
         g_keyCount++;
     }
+}
+
+static VOID QueueKeys(UCHAR state)
+{
+    QueueReport(REPORT_ID_KEYS, state);
 }
 
 // Key reports first (they are rare and must not be lost), then the touch report.
@@ -144,7 +189,7 @@ static VOID FlushReports(VOID)
         if (irp == NULL)
             return;
         buffer = (UCHAR *) irp->UserBuffer;
-        buffer[0] = REPORT_ID_KEYS;
+        buffer[0] = g_keyIds[g_keyHead];
         buffer[1] = g_keyQueue[g_keyHead];
         g_keyHead = (g_keyHead + 1) % KEY_QUEUE;
         g_keyCount--;
@@ -167,17 +212,258 @@ static VOID FlushReports(VOID)
     IoCompleteRequest(irp, IO_NO_INCREMENT);
 }
 
-// Volume buttons: two equal samples (20 ms) make a change. A held button sends one more
-// release/press pair every KEY_STEP_MS after KEY_REPEAT_MS, so the volume keeps moving.
-static VOID PollKeys(VOID)
+// ---- I2C5 (PMIC, RTC), normal mode, up to 4 bytes; only this driver uses it in Windows ----
+
+static BOOLEAN P5Xfer(UCHAR addr, BOOLEAN read, ULONG *data, ULONG size)
 {
-    static UCHAR last, stable;
-    static ULONG heldMs;
+    ULONG poll;
+
+    g_i2c5[0x04 / 4] = ((ULONG) addr << 1) | (read ? 1 : 0);
+    if (!read)
+        g_i2c5[0x0C / 4] = *data;
+    g_i2c5[0x00 / 4] = ((size - 1) << 1) | (2 << 12) | (1 << 11) | (read ? (1 << 6) : 0);
+    g_i2c5[0x8C / 4] = (1 << 5) | (1 << 2) | 1;
+    for (poll = 0; poll < 20 && (g_i2c5[0x8C / 4] & 1); poll++)
+        KeStallExecutionProcessor(1);
+    g_i2c5[0x00 / 4] |= 1 << 9;
+    for (poll = 0; g_i2c5[0x1C / 4] & (1 << 8); poll++) {
+        if (poll == 20000)
+            return FALSE;
+        KeStallExecutionProcessor(10);
+    }
+    if (g_i2c5[0x1C / 4] & 0xF)
+        return FALSE;
+    if (read)
+        *data = g_i2c5[0x0C / 4];
+    return TRUE;
+}
+
+static BOOLEAN P5Read(UCHAR addr, UCHAR reg, UCHAR *value)
+{
+    ULONG data = reg;
+
+    if (!P5Xfer(addr, FALSE, &data, 1) || !P5Xfer(addr, TRUE, &data, 1))
+        return FALSE;
+    *value = (UCHAR) data;
+    return TRUE;
+}
+
+static BOOLEAN P5Write(UCHAR addr, UCHAR reg, UCHAR value)
+{
+    ULONG data = reg | ((ULONG) value << 8);
+
+    return P5Xfer(addr, FALSE, &data, 2);
+}
+
+// ---- Clock -------------------------------------------------------------------------
+
+static LONGLONG DaysFromCivil(LONG y, ULONG m, ULONG d)
+{
+    LONG era;
+    ULONG yoe, doy, doe;
+
+    y -= m <= 2;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = (ULONG) (y - era * 400);
+    doy = (153 * (m + (m > 2 ? (ULONG) -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (LONGLONG) era * 146097 + (LONGLONG) doe - 719468;
+}
+
+static ULONG FromBcd(UCHAR v, BOOLEAN bcd)
+{
+    return bcd ? (ULONG) ((v >> 4) * 10 + (v & 0xF)) : v;
+}
+
+// RTC as seconds since 1970 (its own reference; the stored offset makes it real time).
+static BOOLEAN RtcRead(LONGLONG *seconds)
+{
+    UCHAR control, r[7];
+    ULONG sec, min, hour, day, month, year;
+    BOOLEAN bcd;
+
+    if (g_i2c5 == NULL || !P5Write(RTC_ADDR, 0x04, 0x10))       // UPDATE0: registers from the clock
+        return FALSE;
+    KeStallExecutionProcessor(1000);
+    if (!P5Read(RTC_ADDR, 0x03, &control))
+        return FALSE;
+    for (ULONG i = 0; i < 7; i++) {
+        if (!P5Read(RTC_ADDR, (UCHAR) (0x07 + i), &r[i]))
+            return FALSE;
+    }
+    bcd = (control & 1) == 0;
+    sec = FromBcd(r[0] & 0x7F, bcd);
+    min = FromBcd(r[1] & 0x7F, bcd);
+    if (control & 2) {
+        hour = FromBcd(r[2] & 0x3F, bcd);
+    } else {
+        hour = FromBcd(r[2] & 0x1F, bcd) % 12;
+        if (r[2] & 0x40)
+            hour += 12;
+    }
+    month = FromBcd(r[4] & 0x1F, bcd);
+    year = FromBcd(r[5] & 0x7F, bcd) + 2000;
+    day = FromBcd(r[6] & 0x3F, bcd);
+    if (sec > 59 || min > 59 || hour > 23 || month < 1 || month > 12 || day < 1 || day > 31)
+        return FALSE;
+    *seconds = ((DaysFromCivil((LONG) year, month, day) * 24 + hour) * 60 + min) * 60 + sec;
+    return TRUE;
+}
+
+static LONGLONG UnixNow(VOID)
+{
+    LARGE_INTEGER now;
+
+    KeQuerySystemTime(&now);
+    return (now.QuadPart - UNIX_1601) / 10000000;
+}
+
+static HANDLE OpenParameters(VOID)
+{
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES attributes;
+    HANDLE key = NULL;
+
+    RtlInitUnicodeString(&name, L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\swhid\\Parameters");
+    InitializeObjectAttributes(&attributes, &name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(ZwCreateKey(&key, KEY_READ | KEY_WRITE, &attributes, 0, NULL, REG_OPTION_NON_VOLATILE, NULL)))
+        return NULL;
+    return key;
+}
+
+static BOOLEAN OffsetLoad(LONGLONG *offset)
+{
+    UNICODE_STRING name;
+    UCHAR buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(LONGLONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION info = (PKEY_VALUE_PARTIAL_INFORMATION) buffer;
+    ULONG length;
+    HANDLE key = OpenParameters();
+    BOOLEAN ok;
+
+    if (key == NULL)
+        return FALSE;
+    RtlInitUnicodeString(&name, L"RtcOffset");
+    ok = NT_SUCCESS(ZwQueryValueKey(key, &name, KeyValuePartialInformation, info, sizeof(buffer), &length)) &&
+         info->Type == REG_QWORD && info->DataLength == sizeof(LONGLONG);
+    if (ok)
+        RtlCopyMemory(offset, info->Data, sizeof(LONGLONG));
+    ZwClose(key);
+    return ok;
+}
+
+static VOID OffsetSave(LONGLONG offset)
+{
+    UNICODE_STRING name;
+    HANDLE key = OpenParameters();
+
+    if (key == NULL)
+        return;
+    RtlInitUnicodeString(&name, L"RtcOffset");
+    ZwSetValueKey(key, &name, 0, REG_QWORD, &offset, sizeof(offset));
+    ZwFlushKey(key);
+    ZwClose(key);
+}
+
+static LONGLONG g_offset;
+static BOOLEAN g_offsetKnown;
+
+// At start: system time = RTC + stored offset, when they differ by more than 30 s.
+static VOID ClockStart(VOID)
+{
+    LONGLONG rtc, target, now;
+    LARGE_INTEGER time;
+
+    g_offsetKnown = OffsetLoad(&g_offset);
+    if (!RtcRead(&rtc)) {
+        LogText("clock: rtc read failed\r\n");
+        return;
+    }
+    if (!g_offsetKnown) {
+        LogText("clock: no offset yet\r\n");
+        return;
+    }
+    target = rtc + g_offset;
+    now = UnixNow();
+    if (target < PLAUSIBLE_UNIX || (target - now < 30 && now - target < 30))
+        return;
+    time.QuadPart = target * 10000000 + UNIX_1601;
+    LogText(NT_SUCCESS(ZwSetSystemTime(&time, NULL)) ? "clock: set from rtc\r\n" : "clock: set failed\r\n");
+}
+
+// While Windows has a real time, keep the offset to the RTC (it follows NTP and manual changes).
+static VOID ClockLearn(VOID)
+{
+    LONGLONG rtc, now = UnixNow(), offset;
+
+    if (now < PLAUSIBLE_UNIX || !RtcRead(&rtc))
+        return;
+    offset = now - rtc;
+    if (g_offsetKnown && offset - g_offset < 3 && g_offset - offset < 3)
+        return;
+    g_offset = offset;
+    g_offsetKnown = TRUE;
+    OffsetSave(offset);
+    LogText("clock: offset saved\r\n");
+    SaveLog();
+}
+
+// ---- Backlight ---------------------------------------------------------------------
+
+static VOID Backlight(ULONG duty)
+{
+    if (g_pwm != NULL)
+        g_pwm[PWM_CSR0] = PWM_ENABLE | (duty << 16);
+}
+
+static VOID ScreenOn(BOOLEAN on)
+{
+    g_screenOff = !on;
+    Backlight(on ? g_duty : 0);
+}
+
+static VOID Brightness(LONG step)
+{
+    LONG duty = (LONG) g_duty + step;
+
+    g_duty = (ULONG) (duty < BRIGHT_MIN ? BRIGHT_MIN : duty > 255 ? 255 : duty);
+    ScreenOn(TRUE);
+}
+
+// ---- Buttons -----------------------------------------------------------------------
+
+// Volume: two equal samples (20 ms) make a change; held, one more release/press pair every
+// KEY_STEP_MS after KEY_REPEAT_MS. Power (read every 50 ms): see the top of the file.
+static VOID PollKeys(ULONG polls)
+{
+    static UCHAR last, stable, sent;
+    static ULONG heldMs, powerMs;
+    static BOOLEAN power, combo, powerSent;
     ULONG in;
     UCHAR now;
 
     if (g_gpio == NULL)
         return;
+    if (g_i2c5 != NULL && polls % POWER_EVERY == 0) {
+        UCHAR status;
+
+        if (P5Read(PMIC_ADDR, PMIC_ONOFFSTAT, &status))
+            power = (status & PMIC_EN0) != 0;
+    }
+    if (power) {
+        powerMs += POLL_MS;
+        if (!combo && !powerSent && powerMs >= POWER_HOLD_MS) {
+            QueueReport(REPORT_ID_POWER, 1);
+            QueueReport(REPORT_ID_POWER, 0);
+            powerSent = TRUE;
+        }
+    } else if (powerMs != 0) {
+        if (!combo && !powerSent)
+            ScreenOn(g_screenOff);
+        powerMs = 0;
+        combo = FALSE;
+        powerSent = FALSE;
+    }
+
     in = g_gpio[GPIO_PX_IN];
     now = (UCHAR) (((in & PX_VOL_UP) ? 0 : 1) | ((in & PX_VOL_DOWN) ? 0 : 2));
     if (now != last) {
@@ -187,10 +473,22 @@ static VOID PollKeys(VOID)
     if (now != stable) {
         stable = now;
         heldMs = 0;
-        QueueKeys(now);
+        if (power) {
+            // Power held: volume buttons change the brightness instead of the volume.
+            combo = TRUE;
+            if (now == 1)
+                Brightness(BRIGHT_STEP);
+            else if (now == 2)
+                Brightness(-BRIGHT_STEP);
+            return;
+        }
+        if (now != sent) {
+            QueueKeys(now);
+            sent = now;
+        }
         return;
     }
-    if (stable == 0)
+    if (stable == 0 || power)
         return;
     heldMs += POLL_MS;
     if (heldMs >= KEY_REPEAT_MS && (heldMs - KEY_REPEAT_MS) % KEY_STEP_MS == 0) {
@@ -216,6 +514,16 @@ static VOID StartKeys(VOID)
         return;
     }
     LogText("hid: volume buttons ok\r\n");
+    address.QuadPart = I2C5_BASE;
+    g_i2c5 = MmMapIoSpace(address, I2C5_SIZE, MmNonCached);
+    address.QuadPart = PWM_BASE;
+    g_pwm = MmMapIoSpace(address, PWM_SIZE, MmNonCached);
+    if (g_pwm != NULL) {
+        g_duty = (g_pwm[PWM_CSR0] >> 16) & 0xFF;
+        if (g_duty < BRIGHT_MIN)
+            g_duty = 150;
+    }
+    ClockStart();
 }
 
 typedef struct _CONTACT {
@@ -255,6 +563,12 @@ static VOID UpdateContact(const UCHAR *event)
 static VOID BuildReport(VOID)
 {
     ULONG count = 0;
+
+    if (g_screenOff) {
+        // Backlight off: the screen cannot be seen, so touches are dropped.
+        RtlZeroMemory(g_contacts, sizeof(g_contacts));
+        return;
+    }
 
     RtlZeroMemory(g_report, REPORT_SIZE);
     g_report[0] = REPORT_ID_TOUCH;
@@ -312,7 +626,9 @@ VOID PollThread(PVOID context)
             SaveLog();
         }
         BuildReport();
-        PollKeys();
+        PollKeys(polls);
+        if (polls % CLOCK_EVERY == 0)
+            ClockLearn();
         FlushReports();
     }
     PsTerminateSystemThread(STATUS_SUCCESS);
@@ -352,9 +668,19 @@ static VOID StopPolling(VOID)
     g_thread = NULL;
     MmUnmapIoSpace((PVOID) g_i2c, I2C3_SIZE);
     g_i2c = NULL;
+    if (g_screenOff)
+        ScreenOn(TRUE);
     if (g_gpio != NULL) {
         MmUnmapIoSpace((PVOID) g_gpio, GPIO_SIZE);
         g_gpio = NULL;
+    }
+    if (g_i2c5 != NULL) {
+        MmUnmapIoSpace((PVOID) g_i2c5, I2C5_SIZE);
+        g_i2c5 = NULL;
+    }
+    if (g_pwm != NULL) {
+        MmUnmapIoSpace((PVOID) g_pwm, PWM_SIZE);
+        g_pwm = NULL;
     }
     g_keyCount = 0;
 
