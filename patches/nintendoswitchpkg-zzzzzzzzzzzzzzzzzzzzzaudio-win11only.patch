@@ -1,0 +1,361 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -1284,6 +1284,306 @@
+     MmioWrite32(0x6000421C, BIT26);
+     MmioWrite32(0x60004224, BIT26);
+     if (!(MmioRead32(0x60004220) & BIT26)) goto Failed;
++    return;
++
++Failed:
++    WpDraw(Stage, FALSE);
++    RamUs(20000000);
++}
++
++// ---- Audio preparation (Windows 11 builds) -----------------------------------------------------
++// Speaker path for the SwitchAudio driver (winx project, ACPI AUD0, SWOA0C01), which only feeds
++// ADMA channel 0. Ported from the winx UEFI audio bring-up (R393-R403, Lite profile): for audio,
++// Switchroot's Iowa (modin) and Lite (vali) trees are the same (ALC5639 on I2C1 at 0x1C, LDO1_EN
++// PZ4, I2S1/DAP1, audio pads on SD3 at 1.8 V, jack switch PV6). Data path: ADMA ch0 -> ADMAIF1
++// TX -> XBAR -> I2S1 (Tegra master, 48 kHz, 16 bit, BCLK from clk_m) -> DAP1 -> codec AIF1 ->
++// DAC -> SPK MIX -> class D speaker at -18 dB (or the headphones when plugged in at boot).
++// Only on a failure the values are drawn as rows of squares (see WpDraw).
++#define AU_I2C1             0x7000C000
++#define AU_CODEC            0x1C
++#define AU_ADMAIF           0x702D0000
++#define AU_XBAR             0x702D0800
++#define AU_I2S1             0x702D1000
++#define AU_GPIO_PB          0x6000D004
++#define AU_GPIO_PV          0x6000D504
++#define AU_GPIO_PZ          0x6000D604
++#define AU_SPK_VOL          0x1414          // -18 dB
++#define AU_HP_VOL           0x1818          // -24 dB
++#define AU_MUTE             0x8080
++#define AU_ACIF_16_STEREO   ((1U << 20) | (1U << 16) | (3U << 12) | (3U << 8))
++
++// Tegra I2C transfer of up to 4 bytes on I2C1 (same controller sequence as CpuI2c on I2C5).
++STATIC BOOLEAN
++AuI2c(BOOLEAN Read, UINT32 *Data, UINT32 Size)
++{
++    UINTN Poll;
++
++    MmioWrite32(AU_I2C1 + 0x04, ((UINT32) AU_CODEC << 1) | (Read ? 1 : 0));
++    if (!Read) MmioWrite32(AU_I2C1 + 0x0C, *Data);
++    MmioWrite32(AU_I2C1 + 0x00, ((Size - 1) << 1) | 0x2800 | (Read ? BIT6 : 0));
++    MmioWrite32(AU_I2C1 + 0x8C, BIT5 | BIT2 | BIT0);
++    for (Poll = 0; Poll < 20 && (MmioRead32(AU_I2C1 + 0x8C) & BIT0); Poll++) RamUs(1);
++    MmioWrite32(AU_I2C1 + 0x00, MmioRead32(AU_I2C1 + 0x00) | BIT9);
++    for (Poll = 0; MmioRead32(AU_I2C1 + 0x1C) & BIT8; Poll++) {
++        if (Poll > 20000) return FALSE;
++        RamUs(1);
++    }
++    if (MmioRead32(AU_I2C1 + 0x1C) & 0xF) return FALSE;
++    if (Read) *Data = MmioRead32(AU_I2C1 + 0x0C);
++    return TRUE;
++}
++
++// rt5640 registers: 8-bit address, 16-bit big-endian value.
++STATIC BOOLEAN
++AuRead(UINT8 Reg, UINT16 *Value)
++{
++    UINT32 Data = Reg;
++
++    if (!AuI2c(FALSE, &Data, 1) || !AuI2c(TRUE, &Data, 2)) return FALSE;
++    *Value = (UINT16) (((Data & 0xFF) << 8) | ((Data >> 8) & 0xFF));
++    return TRUE;
++}
++
++STATIC BOOLEAN
++AuWrite(UINT8 Reg, UINT16 Value)
++{
++    UINT32 Data = Reg | ((UINT32) (Value >> 8) << 8) | ((UINT32) (Value & 0xFF) << 16);
++
++    return AuI2c(FALSE, &Data, 3);
++}
++
++STATIC BOOLEAN
++AuUpdate(UINT8 Reg, UINT16 Clear, UINT16 Set)
++{
++    UINT16 Value;
++
++    return AuRead(Reg, &Value) && AuWrite(Reg, (UINT16) ((Value & ~Clear) | Set));
++}
++
++STATIC BOOLEAN
++AuPrivWrite(UINT8 Index, UINT16 Value)
++{
++    return AuWrite(0x6A, Index) && AuWrite(0x6C, Value);
++}
++
++STATIC BOOLEAN
++AuPrivUpdate(UINT8 Index, UINT16 Clear, UINT16 Set)
++{
++    UINT16 Value;
++
++    return AuWrite(0x6A, Index) && AuRead(0x6C, &Value) && AuWrite(0x6C, (UINT16) ((Value & ~Clear) | Set));
++}
++
++// Audio and audio-hv pads: 1.8 V selection (as Switchroot's B01 iopad defaults) and out of DPD.
++STATIC BOOLEAN
++AuPads(VOID)
++{
++    STATIC CONST struct { UINTN Request, Status; UINT32 Bit; } Pads[] = {
++        { 0x1B8, 0x1BC, BIT17 },    // AUDIO
++        { 0x1C0, 0x1C4, BIT29 },    // AUDIO_HV
++    };
++    CONST UINT32 Mask = BIT5 | BIT18;
++    UINT32 Sample = MmioRead32(WP_PMC + 0x20), Timer = MmioRead32(WP_PMC + 0x1C8);
++    UINTN Index, Poll;
++    BOOLEAN Ok = TRUE;
++
++    MmioOr32(WP_PMC + 0x48, Mask);
++    MmioAnd32(WP_PMC + 0xE4, ~Mask);
++    MmioAnd32(WP_PMC + 0x44, ~Mask);
++    RamUs(250);
++    for (Index = 0; Index < ARRAY_SIZE(Pads) && Ok; Index++) {
++        if (!(MmioRead32(WP_PMC + Pads[Index].Status) & Pads[Index].Bit)) continue;
++        MmioWrite32(WP_PMC + 0x20, 1);
++        MmioWrite32(WP_PMC + 0x1C8, 41);
++        MmioWrite32(WP_PMC + Pads[Index].Request, BIT30 | Pads[Index].Bit);
++        Ok = WpWait(WP_PMC, Pads[Index].Status, Pads[Index].Bit, 0, 250000);
++    }
++    MmioWrite32(WP_PMC + 0x20, Sample);
++    MmioWrite32(WP_PMC + 0x1C8, Timer);
++    return Ok && !((MmioRead32(WP_PMC + 0xE4) | MmioRead32(WP_PMC + 0x44)) & Mask);
++}
++
++// The codec's speaker path for AIF1 playback, slave, sysclk = PLL1 from BCLK1 (rt5640, Switchroot
++// NX init_list).
++STATIC BOOLEAN
++AuCodecSetup(VOID)
++{
++    STATIC CONST UINT16 Init[][2] = {
++        { 0x1D, 0x0347 }, { 0x3D, 0x3600 }, { 0x12, 0x0AA8 }, { 0x14, 0x8AAA },
++        { 0x20, 0x6110 }, { 0x21, 0xE0E0 }, { 0x23, 0x1804 },
++    };
++    BOOLEAN Ok = TRUE;
++    UINTN Index;
++
++    Ok &= AuWrite(0x00, 0);
++    WpMs(10);
++    for (Index = 0; Index < ARRAY_SIZE(Init); Index++) Ok &= AuPrivWrite((UINT8) Init[Index][0], Init[Index][1]);
++    Ok &= AuUpdate(0x63, 0, BIT15 | BIT13 | BIT11 | BIT4);
++    WpMs(15);
++    Ok &= AuUpdate(0x63, 0, BIT14 | BIT3);
++    Ok &= AuUpdate(0xFA, 0, 0x0001);
++    Ok &= AuUpdate(0x93, 0, 0x0030);
++    Ok &= AuUpdate(0x64, 0, BIT9);
++    Ok &= AuWrite(0x81, (UINT16) ((62U << 7) | 2U));
++    Ok &= AuWrite(0x82, BIT11);
++    Ok &= AuWrite(0x80, BIT14 | BIT12);
++    Ok &= AuWrite(0x70, 0x8000);
++    Ok &= AuUpdate(0x61, 0, BIT15 | BIT12 | BIT11 | BIT0);
++    Ok &= AuUpdate(0x2A, BIT14 | BIT6, 0);
++    Ok &= AuUpdate(0x46, BIT3, 0);
++    Ok &= AuUpdate(0x47, BIT3, 0);
++    Ok &= AuUpdate(0x48, BIT12, 0);
++    Ok &= AuUpdate(0x49, BIT12, 0);
++    Ok &= AuUpdate(0x65, 0, BIT13 | BIT12);
++    Ok &= AuUpdate(0x66, 0, BIT15 | BIT14);
++    Ok &= AuWrite(0x01, AU_SPK_VOL);
++    return Ok;
++}
++
++// Headphone path (muted); PV6 (jack switch, low = plugged) as an input picks the output at boot.
++STATIC BOOLEAN
++AuHeadphones(VOID)
++{
++    BOOLEAN Ok = TRUE;
++
++    Ok &= AuWrite(0x02, AU_HP_VOL | AU_MUTE);
++    Ok &= AuUpdate(0x4F, BIT0, 0);
++    Ok &= AuUpdate(0x52, BIT0, 0);
++    Ok &= AuUpdate(0x45, BIT13, BIT15 | BIT14);
++    Ok &= AuUpdate(0x65, 0, BIT15 | BIT14);
++    Ok &= AuUpdate(0x66, 0, BIT11 | BIT10);
++    Ok &= AuUpdate(0x63, 0, BIT7 | BIT6);
++    Ok &= AuPrivUpdate(0x24, 0x0700, 0x0200);
++    Ok &= AuUpdate(0x8F, BIT13, BIT13);
++    Ok &= AuUpdate(0x8E, BIT3 | BIT2 | BIT0, BIT3 | BIT0);
++    Ok &= AuPrivWrite(0x77, 0x9F00);
++    Ok &= AuUpdate(0x63, BIT14 | BIT3, 0);
++    Ok &= AuUpdate(0x63, 0, BIT5);
++    WpMs(15);
++    Ok &= AuUpdate(0x63, 0, BIT14 | BIT3);
++    Ok &= AuUpdate(0x8F, BIT13 | BIT6, BIT6);
++    Ok &= AuUpdate(0x91, 3U << 8, 2U << 8);
++    Ok &= AuUpdate(0x90, 0x0777, (7U << 8) | (3U << 4) | 7U);
++    Ok &= AuPrivWrite(0x37, 0x1C00);
++    Ok &= AuUpdate(0x8E, BIT3 | BIT2, BIT2);
++    Ok &= AuPrivUpdate(0x24, 0x0700, 0x0400);
++    MmioWrite32(WP_PINMUX + 0x214, (MmioRead32(WP_PINMUX + 0x214) & ~0x0FU) | BIT6 | BIT4);
++    BtGpio(AU_GPIO_PV, 0x10, 6, FALSE);
++    BtGpio(AU_GPIO_PV, 0x00, 6, TRUE);
++    RamUs(1000);
++    if (!(MmioRead32(AU_GPIO_PV + 0x30) & BIT6)) {
++        Ok &= AuWrite(0x01, AU_SPK_VOL | AU_MUTE);
++        Ok &= AuWrite(0x02, AU_HP_VOL);
++    }
++    return Ok;
++}
++
++STATIC VOID
++AudioPrepare(VOID)
++{
++    UINT32 Stage, ClkmKhz, Div, Cif, Stream, Ctrl, Power = BIT27;
++    UINT16 Id1 = 0, Id2 = 0;
++    UINTN Try;
++
++    mWpRowCount = 0;
++    Stage = 0x200 | 1;
++    if ((MmioRead32(0x70000804) & 0xFFF0U) != 0x2120U) goto Failed;
++    // I2C1 (battery and codec) must already run: hekate starts it for the fuel gauge.
++    if (!(MmioRead32(WP_CAR + 0x010) & BIT12) || (MmioRead32(WP_CAR + 0x004) & BIT12)) goto Failed;
++
++    // Stage 2: audio pads at 1.8 V, out of deep power down.
++    Stage = 0x200 | 2;
++    if (!AuPads()) goto Failed;
++
++    // Stage 3: APE power partition (hekate's PMC sequence), APE/d_audio/APB2APE clocks.
++    Stage = 0x200 | 3;
++    if (!(MmioRead32(WP_PMC + WP_PG_STATUS) & Power)) {
++        MmioWrite32(WP_CAR + 0x2A8, BIT6);
++        MmioWrite32(WP_CAR + 0x430, BIT10 | BIT11);
++        if (!WpWait(WP_PMC, WP_PG_TOGGLE, BIT8, 0, 5000)) goto Failed;
++        MmioWrite32(WP_PMC + WP_PG_TOGGLE, BIT8 | 27);
++        if (!WpWait(WP_PMC, WP_PG_STATUS, Power, Power, 5000)) goto Failed;
++    }
++    MmioWrite32(WP_CAR + 0x29C, BIT6);
++    MmioWrite32(WP_CAR + 0x3D0, 0xC0000000);
++    MmioWrite32(WP_CAR + 0x440, BIT10 | BIT11);
++    RamUs(10);
++    MmioWrite32(WP_PMC + WP_PG_CLAMP, Power);
++    if (!WpWait(WP_PMC, 0x2C, Power, 0, 5000)) goto Failed;
++    MmioWrite32(WP_CAR + 0x434, BIT10 | BIT11);
++    MmioWrite32(WP_CAR + 0x2AC, BIT6);
++    RamUs(10);
++
++    // Stage 4: codec power (LDO1_EN = PZ4 high), 400 ms as Linux rt5640, then its Realtek ID.
++    Stage = 0x200 | 4;
++    MmioWrite32(WP_PINMUX + 0x28C, BIT2);
++    BtGpio(AU_GPIO_PZ, 0x20, 4, TRUE);
++    BtGpio(AU_GPIO_PZ, 0x10, 4, TRUE);
++    BtGpio(AU_GPIO_PZ, 0x00, 4, TRUE);
++    WpMs(400);
++    for (Try = 0; Try < 6 && !AuRead(0xFE, &Id1); Try++) WpMs(100);
++    (VOID) AuRead(0xFF, &Id2);
++    WpLog(((UINT32) Id1 << 16) | Id2);
++    if (Id1 != 0x10EC || Id2 != 0x6231) goto Failed;
++
++    // Stage 5: I2S1 clock = BCLK = 1.536 MHz from clk_m; DAP1 pins to I2S1 (Switchroot pinmux).
++    Stage = 0x200 | 5;
++    ClkmKhz = 38400U / (((MmioRead32(WP_CAR + 0x55C) >> 2) & 3U) + 1U);
++    Div = (2U * ClkmKhz) / 1536U - 2U;
++    if (!(MmioRead32(WP_CAR + 0x010) & BIT30) || (MmioRead32(WP_CAR + 0x004) & BIT30)) {
++        MmioWrite32(WP_CAR + 0x300, BIT30);
++        MmioWrite32(WP_CAR + 0x1D8, (3U << 30) | Div);
++        MmioWrite32(WP_CAR + 0x320, BIT30);
++        RamUs(10);
++        MmioWrite32(WP_CAR + 0x304, BIT30);
++        RamUs(10);
++    }
++    MmioWrite32(WP_CAR + 0x1D8, (3U << 30) | Div);
++    RamUs(10);
++    MmioWrite32(WP_PINMUX + 0x124, 0);
++    MmioWrite32(WP_PINMUX + 0x130, 0);
++    MmioWrite32(WP_PINMUX + 0x12C, 0);
++    MmioWrite32(WP_PINMUX + 0x128, BIT2 | BIT4 | BIT6);
++    for (Try = 0; Try < 4; Try++) BtGpio(AU_GPIO_PB, 0x00, (UINT32) Try, FALSE);
++
++    // Stage 6: I2S1 master, I2S mode, 16 bit stereo; XBAR I2S1 <- ADMAIF1; ADMAIF1 TX 16-bit pack.
++    Stage = 0x200 | 6;
++    MmioWrite32(AU_I2S1 + 0x80, 0);
++    MmioWrite32(AU_I2S1 + 0x14, 3);
++    MmioWrite32(AU_I2S1 + 0x54, 3);
++    MmioWrite32(AU_I2S1 + 0x60, 0x00007700);
++    MmioWrite32(AU_I2S1 + 0x88, 1);
++    MmioWrite32(AU_I2S1 + 0xB0, 1);
++    MmioWrite32(AU_I2S1 + 0xA0, BIT10 | 3);
++    MmioWrite32(AU_I2S1 + 0xA4, 15);
++    MmioWrite32(AU_I2S1 + 0x24, BIT8);
++    MmioWrite32(AU_I2S1 + 0x20, (3U << 24) | AU_ACIF_16_STEREO);
++    MmioWrite32(AU_XBAR + 0x040, 1);
++    MmioWrite32(AU_XBAR + 0x240, 0);
++    MmioWrite32(AU_XBAR + 0x440, 0);
++    MmioWrite32(AU_ADMAIF + 0x700, 1);
++    MmioWrite32(AU_ADMAIF + 0x314, 1);
++    MmioWrite32(AU_ADMAIF + 0x328, 0x02000300);
++    MmioWrite32(AU_ADMAIF + 0x320, BIT30 | AU_ACIF_16_STEREO);
++    MmioWrite32(AU_ADMAIF + 0x300, 1);
++    Cif = MmioRead32(AU_I2S1 + 0x20);
++    Stream = MmioRead32(AU_I2S1 + 0x24);
++    Ctrl = MmioRead32(AU_I2S1 + 0xA0);
++    MmioWrite32(AU_I2S1 + 0x04, 1);
++    if (!WpWait(AU_I2S1, 0x04, BIT0, 0, 10000)) goto Failed;
++    MmioWrite32(AU_I2S1 + 0x20, Cif);
++    MmioWrite32(AU_I2S1 + 0x24, Stream);
++    MmioWrite32(AU_I2S1 + 0xA0, Ctrl);
++    MmioWrite32(AU_I2S1 + 0x00, 1);
++    MmioWrite32(AU_I2S1 + 0x80, 1);
++    WpMs(5);
++
++    // Stage 7: codec speaker path (PLL from BCLK), then the headphone path and the jack.
++    Stage = 0x200 | 7;
++    if (!AuCodecSetup()) goto Failed;
++    WpMs(50);
++    Stage = 0x200 | 8;
++    if (!AuHeadphones()) goto Failed;
+     return;
+ 
+ Failed:
+@@ -2136,6 +2436,8 @@
+ 	WifiProbe();
+ 	// Windows 11 builds: power the Bluetooth core and check it answers on UART-D.
+ 	BtPrepare();
++	// Windows 11 builds: codec, I2S1 and the speaker path for the Windows audio driver.
++	AudioPrepare();
+ 
+ 	Status = TegraMmcInit();
+ 	if (EFI_ERROR(Status)) goto exit;
+diff --git a/AcpiTables/Dsdt/Dsdt.asl b/AcpiTables/Dsdt/Dsdt.asl
+--- a/AcpiTables/Dsdt/Dsdt.asl
++++ b/AcpiTables/Dsdt/Dsdt.asl
+@@ -241,5 +241,38 @@
+             })
+         }
+ 
++        // Speaker for the SwitchAudio driver (winx project): AHUB (ADMAIF, XBAR, I2S1) and ADMA.
++        // Prepared by AudioPrepare in SdMmc.c; present only when the d_audio clock runs. No
++        // I2cSerialBus to the codec (there is no Windows I2C1 driver), so the driver does not
++        // follow the jack after boot: UEFI picks speaker or headphones at boot.
++        Device (AUD0)
++        {
++            Name (_HID, "SWOA0C01")
++            Name (_UID, Zero)
++            OperationRegion (ACAR, SystemMemory, 0x60006000, 0x400)
++            Field (ACAR, DWordAcc, NoLock, Preserve)
++            {
++                Offset (0x358),
++                ARSV, 32,
++                Offset (0x360),
++                AENV, 32
++            }
++
++            Method (_STA, 0, Serialized)
++            {
++                If (((ARSV & 0x400) == Zero) && ((AENV & 0x400) == 0x400))
++                {
++                    Return (0x0F)
++                }
++                Return (Zero)
++            }
++
++            Name (_CRS, ResourceTemplate ()
++            {
++                Memory32Fixed (ReadWrite, 0x702D0000, 0x00002000)
++                Memory32Fixed (ReadWrite, 0x702E2000, 0x00001000)
++            })
++        }
++
+     } // Scope(_SB)
+ }

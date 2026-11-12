@@ -30,6 +30,7 @@ call :onedrive
 set WIFIREBOOT=
 call :wifi %1
 call :bt %1
+call :audio %1
 
 rem ---- Drivers: swhid (touch, ACPI\SWTS0001) and swbatt (battery and fan, ROOT\SWBATT) ----
 set REBOOT=
@@ -247,4 +248,36 @@ reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWOA0B01" /s >> %LOG% 2>&1
 reg query HKLM\SYSTEM\CurrentControlSet\Services\switchbt\Parameters >> %LOG% 2>&1
 sc query switchbt >> %LOG% 2>&1
 sc query bthserv >> %LOG% 2>&1
+goto :eof
+
+rem Audio (Windows 11 only; ACPI\SWOA0C01 from the Windows 11 UEFI). Package in agent\audio:
+rem switchaudio.sys/.inf. Catalog and signing as for Wi-Fi; installed once per driver build.
+:audio
+if not exist %1:\agent\audio\switchaudio.inf goto :eof
+if not exist %1:\agent\wifi\inf2cat\Inf2Cat.exe goto :eof
+ver | find "10.0.22" >nul || goto :eof
+echo -- audio >> %LOG%
+set AD=C:\swagent\audio
+if exist %AD%\installed-local.ok fc /b %1:\agent\audio\switchaudio.sys %AD%\switchaudio.sys >nul 2>&1 && goto :audioreport
+if exist %AD% rmdir /s /q %AD%
+mkdir %AD%
+copy /y %1:\agent\audio\switchaudio.inf %AD%\ >> %LOG% 2>&1
+copy /y %1:\agent\audio\switchaudio.sys %AD%\ >> %LOG% 2>&1
+%1:\agent\wifi\inf2cat\Inf2Cat.exe /driver:%AD% /os:10_NI_ARM64 >> %LOG% 2>&1
+if not exist %AD%\switchaudio.cat (
+  echo -- audio: no catalog >> %LOG%
+  goto :audioreport
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\wifi\wifi_sign.ps1 %AD%\switchaudio.cat >> %LOG% 2>&1 || (
+  echo -- audio: catalog not signed >> %LOG%
+  goto :audioreport
+)
+pnputil /add-driver %AD%\switchaudio.inf /install >> %LOG% 2>&1
+echo pnputil exit %errorlevel% >> %LOG%
+if %errorlevel% equ 0 echo ok > %AD%\installed-local.ok
+if %errorlevel% equ 3010 echo ok > %AD%\installed-local.ok
+:audioreport
+reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWOA0C01" /s >> %LOG% 2>&1
+reg query HKLM\SYSTEM\CurrentControlSet\Services\switchaudio\Parameters >> %LOG% 2>&1
+sc query switchaudio >> %LOG% 2>&1
 goto :eof
