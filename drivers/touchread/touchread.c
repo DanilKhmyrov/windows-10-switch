@@ -51,7 +51,7 @@
 #define EV_LEAVE        4
 #define EV_MOTION       5
 #define EV_READY        0x10
-#define READY_TRIES     40
+#define READY_TRIES     100             // up to 0.5 s per reset (the panel is sometimes slow)
 #define READY_MS        5
 #define RESET_MS        10
 #define SAMPLE_MS       20
@@ -227,7 +227,9 @@ static BOOLEAN InitPanel(VOID)
         return FALSE;
     }
     LogText("sense=ok\r\n");
-    return TRUE;
+    // Without the ready event the panel sends nothing at all (seen after a reboot): the caller
+    // resets it again.
+    return ready;
 }
 
 #ifndef TOUCHREAD_CORE_ONLY

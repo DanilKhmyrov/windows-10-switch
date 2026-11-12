@@ -784,7 +784,7 @@ VOID PollThread(PVOID context)
     UNREFERENCED_PARAMETER(context);
     delay.QuadPart = -10000LL * POLL_MS;
     BOOLEAN panel = InitPanel();
-    ULONG failures = 0;
+    ULONG failures = 0, tries = 1;
     LogText(panel ? "hid: panel ok\r\n" : "hid: panel FAILED\r\n");
     StartKeys();
     SaveLog();
@@ -795,7 +795,9 @@ VOID PollThread(PVOID context)
         // A panel that does not answer makes every read wait for the I2C timeout, which
         // would slow the buttons down too: then it is only tried again every 5 s.
         if (!panel) {
-            if (polls % PANEL_RETRY_POLLS == PANEL_RETRY_POLLS - 1) {
+            // Ten quick tries (5 s apart), then one a minute: each costs the buttons about a second.
+            if (polls % (tries < 10 ? PANEL_RETRY_POLLS : 12 * PANEL_RETRY_POLLS) == PANEL_RETRY_POLLS - 1) {
+                tries++;
                 panel = InitPanel();
                 LogText(panel ? "hid: panel ok\r\n" : "hid: panel FAILED\r\n");
                 SaveLog();
