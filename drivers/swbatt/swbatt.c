@@ -14,6 +14,12 @@
 // Headphone jack: every JACK_MS it also reads PV6 (the jack switch, low = plugged, Switchroot's
 // realtek,jack-detect-gpios) and moves the sound between the speaker and the headphones by the
 // mute bits of the ALC5639 (0x1C, also on I2C1). Only when UEFI set up the headphone path.
+// USB port power (only when UEFI started the XUSB host, Mariko boards): the BM92T USB-C
+// controller (0x18) reports a device that wants power (an OTG adapter); then the port is powered
+// as Switchroot does (bm92txx.c, bq2419x-charger.c, tegra210b01 device trees): the 5.3 V
+// source (GPIO PX3), VCONN (PK5) and the charger in VBUS mode at 1.3 A, with the BM92T's own
+// over-current protection on. Everything is switched back when the device is removed, on a
+// charger boost fault and when the driver stops.
 #include <ntddk.h>
 #include <batclass.h>
 
@@ -413,6 +419,264 @@ static BOOLEAN CodecMute(UCHAR reg, BOOLEAN mute)
     return Transfer(ADDR_CODEC, FALSE, &data, 3);
 }
 
+// ---- USB port power ----------------------------------------------------------------
+
+#define ADDR_PD         0x18            // BM92T36 USB-C / power delivery controller
+#define PD_STATUS1      0x03
+#define PD_STATUS2      0x04
+#define PD_CONFIG1      0x06
+#define PD_VENDOR_CONFIG 0x1A
+#define PD_FW_TYPE      0x4B
+#define PD_FW_REV       0x4C
+#define PD_FW_TYPE_OK   0x0603
+#define PD_S1_INSERT    (1u << 7)
+#define PD_S1_SRC_MODE  (1u << 12)     // the console is the power source
+#define PD_S2_OTG       (1u << 13)
+#define PD_CONFIG1_SPDSRC (3u << 14)   // 0: both VBUS source switches may close
+#define PD_VENDOR_OCP_OFF (1u << 2)
+#define CHG_PWR_ON      0x01
+#define CHG_TIMER       0x05
+#define CHG_FAULT       0x09
+#define CHG_REVISION    0x0A
+#define CHG_REVISION_OK 0x2F
+#define CHG_MODE_MASK   0x30
+#define CHG_MODE_VBUS   0x20
+#define CHG_BOOST_1300  0x01
+#define CHG_WATCHDOG    0x30
+#define CHG_BOOST_FAULT 0x40
+#define CAR_RST_DEV_U   (0x00C / 4)    // as the _STA of ACPI XHC0: host out of reset, clock on
+#define CAR_ENB_U       (0x018 / 4)
+#define CAR_XUSB_HOST   (1u << 25)
+#define PINMUX_BASE     0x70003000ULL
+#define PINMUX_PX3      (0x228 / 4)    // 5.3 V VBUS source enable
+#define PINMUX_PK5      (0x268 / 4)    // VCONN enable
+#define PINMUX_PULL_DOWN (1u << 2)
+#define GPIO_PX_CNF     (0x50C / 4)
+#define GPIO_PX_OE      (0x51C / 4)
+#define GPIO_PX_OUT     (0x52C / 4)
+#define PX3             (1u << 3)
+#define GPIO_PK_CNF     (0x208 / 4)
+#define GPIO_PK_OE      (0x218 / 4)
+#define GPIO_PK_OUT     (0x228 / 4)
+#define PK5             (1u << 5)
+
+static BOOLEAN g_usb;                   // port power may be switched
+static BOOLEAN g_vbus;                  // port powered now
+static BOOLEAN g_vbusFault;             // boost fault: off until the device is removed
+static ULONG g_chgSaved;                // charger REG01 before VBUS mode
+
+static VOID LogHex4(ULONG value)
+{
+    static const CHAR digits[] = "0123456789ABCDEF";
+    CHAR text[6];
+
+    for (ULONG i = 0; i < 4; i++)
+        text[i] = digits[(value >> (12 - i * 4)) & 0xF];
+    text[4] = ' ';
+    text[5] = 0;
+    LogText(text);
+}
+
+static BOOLEAN PdRead(UCHAR reg, ULONG *value)
+{
+    if (!ReadReg(ADDR_PD, reg, 2, value))
+        return FALSE;
+    *value &= 0xFFFF;
+    return TRUE;
+}
+
+static BOOLEAN PdWrite(UCHAR reg, ULONG value)
+{
+    ULONG data = reg | ((value & 0xFF) << 8) | ((value >> 8) << 16);
+
+    return Transfer(ADDR_PD, FALSE, &data, 3);
+}
+
+static BOOLEAN ChgRead(UCHAR reg, ULONG *value)
+{
+    if (!ReadReg(ADDR_CHARGER, reg, 1, value))
+        return FALSE;
+    *value &= 0xFF;
+    return TRUE;
+}
+
+static BOOLEAN ChgWrite(UCHAR reg, ULONG value)
+{
+    ULONG data = reg | ((value & 0xFF) << 8), back;
+
+    return Transfer(ADDR_CHARGER, FALSE, &data, 2) && ChgRead(reg, &back) && back == (value & 0xFF);
+}
+
+// The two enable pins as GPIO outputs, low. Pin settings from Switchroot's pinmux tables.
+static VOID UsbPins(BOOLEAN on)
+{
+    if (on) {
+        g_gpio[GPIO_PX_OUT] |= PX3;
+        KeStallExecutionProcessor(10000);      // regulator ramp, as its device tree node says
+        g_gpio[GPIO_PK_OUT] |= PK5;
+    } else {
+        g_gpio[GPIO_PK_OUT] &= ~PK5;
+        g_gpio[GPIO_PX_OUT] &= ~PX3;
+    }
+}
+
+static VOID UsbPowerOff(VOID)
+{
+    ULONG value;
+
+    if (!g_vbus)
+        return;
+    // Charger back to its previous mode and the 500 mA boost limit, then the supplies off.
+    if (!ChgWrite(CHG_PWR_ON, g_chgSaved & ~CHG_BOOST_1300))
+        LogText("usb: charger restore FAILED\r\n");
+    UsbPins(FALSE);
+    g_vbus = FALSE;
+    LogText("usb: port power off, charger ");
+    if (ChgRead(CHG_PWR_ON, &value))
+        LogHex4(value);
+    LogText("\r\n");
+    SaveLog();
+}
+
+static VOID UsbPowerOn(VOID)
+{
+    ULONG timer, value;
+
+    if (!ChgRead(CHG_PWR_ON, &g_chgSaved) || !ChgRead(CHG_TIMER, &timer)) {
+        LogText("usb: charger read FAILED, no port power\r\n");
+        return;
+    }
+    // Nothing serves the charger watchdog here: with it on, the charger would drop VBUS mode
+    // after 40 s (Switchroot: ti,watchdog-timeout = 0).
+    if ((timer & CHG_WATCHDOG) && !ChgWrite(CHG_TIMER, timer & ~CHG_WATCHDOG)) {
+        LogText("usb: charger watchdog FAILED, no port power\r\n");
+        return;
+    }
+    UsbPins(TRUE);
+    if (!ChgWrite(CHG_PWR_ON, (g_chgSaved & ~CHG_MODE_MASK) | CHG_MODE_VBUS | CHG_BOOST_1300)) {
+        LogText("usb: charger VBUS mode FAILED\r\n");
+        ChgWrite(CHG_PWR_ON, g_chgSaved);
+        UsbPins(FALSE);
+        return;
+    }
+    g_vbus = TRUE;
+    LogText("usb: port power on, charger ");
+    LogHex4(g_chgSaved);
+    if (ChgRead(CHG_PWR_ON, &value))
+        LogHex4(value);
+    LogText("\r\n");
+    SaveLog();
+}
+
+// Once at start: only with the XUSB host running, a known BM92T and a known charger.
+static VOID UsbStart(VOID)
+{
+    PHYSICAL_ADDRESS address;
+    volatile ULONG *car, *pinmux;
+    ULONG type = 0, rev = 0, config = 0, vendor = 0, chg = 0;
+    BOOLEAN host;
+
+    g_usb = FALSE;
+    if (g_gpio == NULL)
+        return;
+    address.QuadPart = 0x60006000ULL;
+    car = MmMapIoSpace(address, 0x100, MmNonCached);
+    if (car == NULL)
+        return;
+    host = !(car[CAR_RST_DEV_U] & CAR_XUSB_HOST) && (car[CAR_ENB_U] & CAR_XUSB_HOST);
+    MmUnmapIoSpace((PVOID) car, 0x100);
+    if (!host) {
+        LogText("usb: host not started, port power not used\r\n");
+        return;
+    }
+    if (!PdRead(PD_FW_TYPE, &type) || !PdRead(PD_FW_REV, &rev) || !PdRead(PD_CONFIG1, &config) ||
+            !PdRead(PD_VENDOR_CONFIG, &vendor) || !ChgRead(CHG_REVISION, &chg)) {
+        LogText("usb: BM92T or charger read FAILED, port power not used\r\n");
+        return;
+    }
+    LogText("usb: bm92t type/rev/config1/vendor ");
+    LogHex4(type);
+    LogHex4(rev);
+    LogHex4(config);
+    LogHex4(vendor);
+    LogText("charger rev ");
+    LogHex4(chg);
+    LogText("\r\n");
+    if (type != PD_FW_TYPE_OK || chg != CHG_REVISION_OK) {
+        LogText("usb: unknown BM92T or charger, port power not used\r\n");
+        return;
+    }
+    // Over-current protection on, both source switches allowed: verified by reading back.
+    if ((vendor & PD_VENDOR_OCP_OFF) && (!PdWrite(PD_VENDOR_CONFIG, vendor & ~PD_VENDOR_OCP_OFF) ||
+            !PdRead(PD_VENDOR_CONFIG, &vendor) || (vendor & PD_VENDOR_OCP_OFF))) {
+        LogText("usb: over-current protection not set, port power not used\r\n");
+        return;
+    }
+    if ((config & PD_CONFIG1_SPDSRC) && (!PdWrite(PD_CONFIG1, config & ~PD_CONFIG1_SPDSRC) ||
+            !PdRead(PD_CONFIG1, &config) || (config & PD_CONFIG1_SPDSRC))) {
+        LogText("usb: source mode not set, port power not used\r\n");
+        return;
+    }
+    address.QuadPart = PINMUX_BASE;
+    pinmux = MmMapIoSpace(address, 0x1000, MmNonCached);
+    if (pinmux == NULL)
+        return;
+    LogText("usb: pins px3/pk5 pinmux ");
+    LogHex4(pinmux[PINMUX_PX3]);
+    LogHex4(pinmux[PINMUX_PK5]);
+    LogText("out ");
+    LogHex4(((g_gpio[GPIO_PX_OUT] & PX3) ? 0x10 : 0) | ((g_gpio[GPIO_PK_OUT] & PK5) ? 1 : 0));
+    LogText("\r\n");
+    // Outputs, low, before the pads drive them.
+    g_gpio[GPIO_PX_OUT] &= ~PX3;
+    g_gpio[GPIO_PX_OE] |= PX3;
+    g_gpio[GPIO_PX_CNF] |= PX3;
+    g_gpio[GPIO_PK_OUT] &= ~PK5;
+    g_gpio[GPIO_PK_OE] |= PK5;
+    g_gpio[GPIO_PK_CNF] |= PK5;
+    pinmux[PINMUX_PX3] = PINMUX_PULL_DOWN;          // rsvd0, pull-down, driven, no input
+    pinmux[PINMUX_PK5] = PINMUX_PULL_DOWN | 1;      // rsvd1, pull-down, driven, no input
+    MmUnmapIoSpace((PVOID) pinmux, 0x1000);
+    g_usb = TRUE;
+    LogText("usb: port power ready\r\n");
+}
+
+// Every JACK_MS. Power on after 4 equal "device wants power" readings (1 s), off after 2
+// readings without it or a failed read.
+static VOID UsbPoll(VOID)
+{
+    static ULONG wants, gone;
+    ULONG s1, s2, fault;
+    BOOLEAN ok, device;
+
+    if (!g_usb)
+        return;
+    ok = PdRead(PD_STATUS1, &s1) && PdRead(PD_STATUS2, &s2);
+    device = ok && (s1 & (PD_S1_INSERT | PD_S1_SRC_MODE)) == (PD_S1_INSERT | PD_S1_SRC_MODE) &&
+        (s2 & PD_S2_OTG);
+    if (device) {
+        gone = 0;
+        if (!g_vbus && !g_vbusFault && ++wants == 4) {
+            LogText("usb: device, status ");
+            LogHex4(s1);
+            LogHex4(s2);
+            LogText("\r\n");
+            UsbPowerOn();
+        }
+        if (g_vbus && ChgRead(CHG_FAULT, &fault) && (fault & CHG_BOOST_FAULT)) {
+            LogText("usb: charger boost fault\r\n");
+            g_vbusFault = TRUE;
+            UsbPowerOff();
+        }
+        return;
+    }
+    wants = 0;
+    if (++gone >= 2) {
+        g_vbusFault = FALSE;
+        UsbPowerOff();
+    }
+}
+
 // Only when UEFI set up the headphone path and left PV6 a GPIO input.
 static VOID JackStart(VOID)
 {
@@ -471,9 +735,12 @@ VOID PollThread(PVOID context)
     RtlZeroMemory(&old, sizeof(old));
     LogClocks();
     JackStart();
+    UsbStart();
+    SaveLog();
 
     do {
         JackPoll();
+        UsbPoll();
         if (pass++ % (POLL_MS / JACK_MS) != 0)
             continue;
         BOOLEAN ok = ReadSnapshot(&s, raw);
@@ -542,6 +809,7 @@ VOID PollThread(PVOID context)
         tick++;
     } while (KeWaitForSingleObject(&g_stop, Executive, KernelMode, FALSE, &delay) == STATUS_TIMEOUT);
 
+    UsbPowerOff();
     SetFan(FAN_MIN_PCT);
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
