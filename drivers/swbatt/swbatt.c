@@ -10,6 +10,9 @@
 // Fan: 50% up to FAN_LOW_C (45 C), then linear to 100% at FAN_HIGH_C (65 C); 100% if the
 // temperature cannot be read. At SHUTDOWN_C and above the system is shut down.
 // I2C1 is set up by UEFI (PmicDxe); no other Windows driver uses it.
+// Headphone jack: every JACK_MS it also reads PV6 (the jack switch, low = plugged, Switchroot's
+// realtek,jack-detect-gpios) and moves the sound between the speaker and the headphones by the
+// mute bits of the ALC5639 (0x1C, also on I2C1). Only when UEFI set up the headphone path.
 #include <ntddk.h>
 #include <batclass.h>
 
@@ -34,6 +37,19 @@ NTSYSAPI NTSTATUS NTAPI ZwInitiatePowerAction(POWER_ACTION SystemAction,
 #define ADDR_GAUGE      0x36
 #define ADDR_CHARGER    0x6B
 #define ADDR_TEMP       0x4C
+#define ADDR_CODEC      0x1C
+#define CODEC_SPK_VOL   0x01
+#define CODEC_HP_VOL    0x02
+#define CODEC_HPO_MIXER 0x45
+#define CODEC_HPVOL_MUTED (1 << 13)    // HPO MIX input from HPOVOL muted: no headphone path
+#define CODEC_MUTE      0x8080
+#define GPIO_BASE       0x6000D000ULL
+#define GPIO_SIZE       0x1000
+#define GPIO_PV_CNF     (0x504 / 4)     // bank 5, port V
+#define GPIO_PV_OE      (0x514 / 4)
+#define GPIO_PV_IN      (0x534 / 4)
+#define PV6             (1 << 6)
+#define JACK_MS         250
 
 #define G_TEMP          0x08
 #define G_REPSOC        0x06
@@ -117,6 +133,8 @@ typedef struct _DEVICE_EXTENSION {
 
 static volatile ULONG *g_i2c;
 static volatile ULONG *g_pwm;
+static volatile ULONG *g_gpio;
+static BOOLEAN g_jack;
 static KEVENT g_stop;
 static PVOID g_thread;
 static FAST_MUTEX g_snapLock;
@@ -360,6 +378,70 @@ static VOID LogClocks(VOID)
     LogText("\r\n");
 }
 
+// ---- Headphone jack ---------------------------------------------------------------
+
+// rt5640 registers: 8-bit address, 16-bit big-endian value.
+static BOOLEAN CodecRead(UCHAR reg, ULONG *value)
+{
+    ULONG raw;
+
+    if (!ReadReg(ADDR_CODEC, reg, 2, &raw))
+        return FALSE;
+    *value = ((raw & 0xFF) << 8) | ((raw >> 8) & 0xFF);
+    return TRUE;
+}
+
+static BOOLEAN CodecMute(UCHAR reg, BOOLEAN mute)
+{
+    ULONG value, data;
+
+    if (!CodecRead(reg, &value))
+        return FALSE;
+    value = mute ? (value | CODEC_MUTE) : (value & ~CODEC_MUTE);
+    data = reg | ((value >> 8) << 8) | ((value & 0xFF) << 16);
+    return Transfer(ADDR_CODEC, FALSE, &data, 3);
+}
+
+// Only when UEFI set up the headphone path and left PV6 a GPIO input.
+static VOID JackStart(VOID)
+{
+    PHYSICAL_ADDRESS address;
+    ULONG hpo = 0;
+
+    g_jack = FALSE;
+    address.QuadPart = GPIO_BASE;
+    g_gpio = MmMapIoSpace(address, GPIO_SIZE, MmNonCached);
+    if (g_gpio == NULL || !(g_gpio[GPIO_PV_CNF] & PV6) || (g_gpio[GPIO_PV_OE] & PV6) ||
+            !CodecRead(CODEC_HPO_MIXER, &hpo) || (hpo & CODEC_HPVOL_MUTED)) {
+        LogText("jack: off\r\n");
+        return;
+    }
+    g_jack = TRUE;
+    LogText("jack: on\r\n");
+}
+
+// Two equal readings make a change; the first stable reading applies the current state too.
+static VOID JackPoll(VOID)
+{
+    static LONG last = -1, applied = -1;
+    LONG plugged;
+
+    if (!g_jack)
+        return;
+    plugged = (g_gpio[GPIO_PV_IN] & PV6) ? 0 : 1;
+    if (plugged != last) {
+        last = plugged;
+        return;
+    }
+    if (plugged == applied)
+        return;
+    if (CodecMute(CODEC_SPK_VOL, plugged != 0) && CodecMute(CODEC_HP_VOL, plugged == 0)) {
+        applied = plugged;
+        LogText(plugged ? "jack: headphones\r\n" : "jack: speaker\r\n");
+        SaveLog();
+    }
+}
+
 VOID PollThread(PVOID context)
 {
     LARGE_INTEGER delay;
@@ -370,12 +452,19 @@ VOID PollThread(PVOID context)
     BOOLEAN shutdownSent = FALSE;
     ULONG hot = 0;
 
+    ULONG pass = 0;
+
     UNREFERENCED_PARAMETER(context);
-    delay.QuadPart = -10000LL * POLL_MS;
+    // The loop runs every JACK_MS for the jack; the battery and fan part every POLL_MS.
+    delay.QuadPart = -10000LL * JACK_MS;
     RtlZeroMemory(&old, sizeof(old));
     LogClocks();
+    JackStart();
 
     do {
+        JackPoll();
+        if (pass++ % (POLL_MS / JACK_MS) != 0)
+            continue;
         BOOLEAN ok = ReadSnapshot(&s, raw);
 
         if (s.socDeciC < 0) {
@@ -605,8 +694,12 @@ static VOID StopPolling(VOID)
         MmUnmapIoSpace((PVOID) g_i2c, I2C_SIZE);
     if (g_pwm != NULL)
         MmUnmapIoSpace((PVOID) g_pwm, PWM_SIZE);
+    if (g_gpio != NULL)
+        MmUnmapIoSpace((PVOID) g_gpio, GPIO_SIZE);
     g_i2c = NULL;
     g_pwm = NULL;
+    g_gpio = NULL;
+    g_jack = FALSE;
 }
 
 static NTSTATUS CompleteIrp(PIRP irp, NTSTATUS status)

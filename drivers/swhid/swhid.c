@@ -3,15 +3,30 @@
 // The FTS4 panel returns an event queue (READ_ALL_EVENT); each event carries the finger ID in the
 // upper 4 bits of its first byte.
 // Reads the panel by polling and only talks to I2C3, address 0x49.
+// The volume buttons (PX6 = up, PX7 = down, low = pressed, as Switchroot's nx-keys) are read on
+// the same poll and reported as a second top-level collection, Consumer Control (Volume
+// Increment / Decrement), so Windows changes the volume and shows its volume flyout.
 #define TOUCHREAD_CORE_ONLY
 #include "../touchread/touchread.c"
 #include <hidport.h>
 
 #define VENDOR_ID       0x057E
 #define PRODUCT_ID      0x2003
-#define VERSION_NUMBER  0x0003
+#define VERSION_NUMBER  0x0004
 #define REPORT_ID_TOUCH 1
 #define REPORT_ID_MAX   2
+#define REPORT_ID_KEYS  3
+#define KEY_REPORT_SIZE 2
+#define KEY_QUEUE       8
+#define GPIO_BASE       0x6000D000ULL
+#define GPIO_SIZE       0x1000
+#define GPIO_PX_CNF     (0x50C / 4)     // bank 5, port X
+#define GPIO_PX_OE      (0x51C / 4)
+#define GPIO_PX_IN      (0x53C / 4)
+#define PX_VOL_UP       (1u << 6)
+#define PX_VOL_DOWN     (1u << 7)
+#define KEY_REPEAT_MS   500             // held longer: one more step every KEY_STEP_MS
+#define KEY_STEP_MS     150
 #define FINGER_SIZE     6
 #define MAX_CONTACTS    5
 #define REPORT_SIZE     (2 + FINGER_SIZE * MAX_CONTACTS)
@@ -45,6 +60,12 @@ static const UCHAR g_reportDescriptor[] = {
     FINGER_COLLECTION, FINGER_COLLECTION, FINGER_COLLECTION, FINGER_COLLECTION, FINGER_COLLECTION,
     0x05, 0x0D, 0x09, 0x54, 0x25, 0x0A, 0x75, 0x08, 0x95, 0x01, 0x81, 0x02,
     0x85, REPORT_ID_MAX, 0x09, 0x55, 0x25, 0x0A, 0x75, 0x08, 0x95, 0x01, 0xB1, 0x02,
+    0xC0,
+    // Consumer Control: bit 0 Volume Increment, bit 1 Volume Decrement.
+    0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01,
+    0x85, REPORT_ID_KEYS, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x02,
+    0x09, 0xE9, 0x09, 0xEA, 0x81, 0x02,
+    0x95, 0x06, 0x81, 0x03,
     0xC0
 };
 
@@ -59,6 +80,9 @@ static KEVENT g_stop;
 static PVOID g_thread;
 static UCHAR g_report[REPORT_SIZE];
 static LONG g_dirty;
+static volatile ULONG *g_gpio;
+static UCHAR g_keyQueue[KEY_QUEUE];      // pending key states, sent before touch reports
+static ULONG g_keyHead, g_keyCount;      // used by the poll thread only
 
 static PDEVICE_OBJECT NextDevice(PDEVICE_OBJECT device)
 {
@@ -99,10 +123,34 @@ static PIRP PopRead(VOID)
     return irp;
 }
 
+static VOID QueueKeys(UCHAR state)
+{
+    if (g_keyCount < KEY_QUEUE) {
+        g_keyQueue[(g_keyHead + g_keyCount) % KEY_QUEUE] = state;
+        g_keyCount++;
+    }
+}
+
+// Key reports first (they are rare and must not be lost), then the touch report.
 static VOID FlushReports(VOID)
 {
     PIRP irp;
 
+    while (g_keyCount != 0) {
+        UCHAR *buffer;
+
+        irp = PopRead();
+        if (irp == NULL)
+            return;
+        buffer = (UCHAR *) irp->UserBuffer;
+        buffer[0] = REPORT_ID_KEYS;
+        buffer[1] = g_keyQueue[g_keyHead];
+        g_keyHead = (g_keyHead + 1) % KEY_QUEUE;
+        g_keyCount--;
+        irp->IoStatus.Status = STATUS_SUCCESS;
+        irp->IoStatus.Information = KEY_REPORT_SIZE;
+        IoCompleteRequest(irp, IO_NO_INCREMENT);
+    }
     if (InterlockedExchange(&g_dirty, 0) == 0)
         return;
     irp = PopRead();
@@ -114,6 +162,57 @@ static VOID FlushReports(VOID)
     irp->IoStatus.Status = STATUS_SUCCESS;
     irp->IoStatus.Information = REPORT_SIZE;
     IoCompleteRequest(irp, IO_NO_INCREMENT);
+}
+
+// Volume buttons: two equal samples (20 ms) make a change. A held button sends one more
+// release/press pair every KEY_STEP_MS after KEY_REPEAT_MS, so the volume keeps moving.
+static VOID PollKeys(VOID)
+{
+    static UCHAR last, stable;
+    static ULONG heldMs;
+    ULONG in;
+    UCHAR now;
+
+    if (g_gpio == NULL)
+        return;
+    in = g_gpio[GPIO_PX_IN];
+    now = (UCHAR) (((in & PX_VOL_UP) ? 0 : 1) | ((in & PX_VOL_DOWN) ? 0 : 2));
+    if (now != last) {
+        last = now;
+        return;
+    }
+    if (now != stable) {
+        stable = now;
+        heldMs = 0;
+        QueueKeys(now);
+        return;
+    }
+    if (stable == 0)
+        return;
+    heldMs += POLL_MS;
+    if (heldMs >= KEY_REPEAT_MS && (heldMs - KEY_REPEAT_MS) % KEY_STEP_MS == 0) {
+        QueueKeys(0);
+        QueueKeys(stable);
+    }
+}
+
+// The pins stay as firmware left them, only as inputs: hekate reads the same buttons.
+static VOID StartKeys(VOID)
+{
+    PHYSICAL_ADDRESS address;
+    ULONG pins = PX_VOL_UP | PX_VOL_DOWN;
+
+    address.QuadPart = GPIO_BASE;
+    g_gpio = MmMapIoSpace(address, GPIO_SIZE, MmNonCached);
+    if (g_gpio == NULL)
+        return;
+    if ((g_gpio[GPIO_PX_CNF] & pins) != pins || (g_gpio[GPIO_PX_OE] & pins) != 0) {
+        LogText("hid: volume pins are not GPIO inputs, buttons off\r\n");
+        MmUnmapIoSpace((PVOID) g_gpio, GPIO_SIZE);
+        g_gpio = NULL;
+        return;
+    }
+    LogText("hid: volume buttons ok\r\n");
 }
 
 typedef struct _CONTACT {
@@ -185,6 +284,7 @@ VOID PollThread(PVOID context)
     UNREFERENCED_PARAMETER(context);
     delay.QuadPart = -10000LL * POLL_MS;
     LogText(InitPanel() ? "hid: panel ok\r\n" : "hid: panel FAILED\r\n");
+    StartKeys();
     SaveLog();
 
     while (KeWaitForSingleObject(&g_stop, Executive, KernelMode, FALSE, &delay) == STATUS_TIMEOUT) {
@@ -193,6 +293,7 @@ VOID PollThread(PVOID context)
                 UpdateContact(&events[i * EVENT_SIZE]);
         }
         BuildReport();
+        PollKeys();
         FlushReports();
     }
     PsTerminateSystemThread(STATUS_SUCCESS);
@@ -232,6 +333,11 @@ static VOID StopPolling(VOID)
     g_thread = NULL;
     MmUnmapIoSpace((PVOID) g_i2c, I2C3_SIZE);
     g_i2c = NULL;
+    if (g_gpio != NULL) {
+        MmUnmapIoSpace((PVOID) g_gpio, GPIO_SIZE);
+        g_gpio = NULL;
+    }
+    g_keyCount = 0;
 
     while ((irp = PopRead()) != NULL) {
         irp->IoStatus.Status = STATUS_CANCELLED;
