@@ -27,6 +27,7 @@ rem Player set during setup would count as years old and Windows would force a c
 net accounts /maxpwage:unlimited >> %LOG% 2>&1
 powershell -NoProfile -Command "Get-LocalUser | Where-Object Enabled | Set-LocalUser -PasswordNeverExpires $true" >> %LOG% 2>&1
 call :removewin10 %1
+call :crashdumps %1
 call :onedrive
 call :noupdate
 set WIFIREBOOT=
@@ -338,6 +339,22 @@ ver | find "10.0.22" >nul || goto :eof
 del %1:\agent\remove-win10.flag
 echo -- remove windows 10 >> %LOG%
 powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\remove_win10.ps1 >> %LOG% 2>&1
+goto :eof
+
+rem Crash dumps of user-mode programs (Windows Error Reporting LocalDumps): minidumps in
+rem C:\swagent\dumps, at most 10; those not yet on the card are copied to agent\dumps.
+:crashdumps
+set LD=HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps
+reg add "%LD%" /v DumpFolder /t REG_EXPAND_SZ /d C:\swagent\dumps /f >nul 2>&1
+reg add "%LD%" /v DumpType /t REG_DWORD /d 1 /f >nul 2>&1
+reg add "%LD%" /v DumpCount /t REG_DWORD /d 10 /f >nul 2>&1
+if not exist C:\swagent\dumps goto :eof
+if not exist %1:\agent\dumps mkdir %1:\agent\dumps
+echo -- crash dumps >> %LOG%
+for %%F in (C:\swagent\dumps\*.dmp) do if not exist "%1:\agent\dumps\%%~nxF" (
+  echo %%~nxF >> %LOG%
+  copy /y "%%F" %1:\agent\dumps\ >nul 2>&1
+)
 goto :eof
 
 rem Windows Update off, on every boot (Windows may turn parts of it back on). A feature update
