@@ -40,7 +40,8 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 | Display | GOP framebuffer (Basic Display), portrait | same | same |
 | Wi-Fi (BCM4356 on PCIe) | no | no (WiFiCx needs Windows 11) | **yes**: 2.4 and 5 GHz (802.11ac), WPA2, Internet ([details](#wi-fi-windows-11)) |
 | Bluetooth (BCM4356A3 on UART-D) | no | no | **yes**: a Bluetooth mouse works ([details](#bluetooth-windows-11)) |
-| Speaker / headphones (ALC5639 on I2S1) | no | no | **yes**: speaker; headphones if plugged in at boot ([details](#audio-windows-11)) |
+| Speaker / headphones (ALC5639 on I2S1) | no | no | **yes**: speaker and headphones, switched when plugged in ([details](#audio-windows-11)) |
+| Volume buttons | no | no | **yes**: Windows volume, with its flyout |
 | USB, GPU | no | no | no |
 
 Windows 11 24H2 and later will not run: they need ARMv8.1 atomics, which the Cortex-A57 lacks.
@@ -131,9 +132,11 @@ Microsoft images inside a Linux container (`ntfs-3g`, `hivex`, `wimlib`):
 WDM drivers built in Docker with clang/lld against the Enterprise WDK 14393 headers (not included),
 test-signed:
 
-- `swhid`: HID touch screen digitizer for the FTS4 panel on I2C3 (up to 5 fingers);
+- `swhid`: HID touch screen digitizer for the FTS4 panel on I2C3 (up to 5 fingers), plus the
+  volume buttons (PX6/PX7) as a Consumer Control collection (Volume Increment/Decrement);
 - `swbatt`: battery class miniport (MAX17050 fuel gauge, BQ24193 charger, TMP451 temperature),
-  fan curve and overheat shutdown.
+  fan curve and overheat shutdown; on Windows 11 also the headphone jack (PV6): it moves the sound
+  between speaker and headphones with the codec's mute bits over I2C1, which it already owns.
 
 `ARCH=arm64 drivers/build.sh` builds the same sources for ARM64. The 14393 headers already
 support ARM64. Instead of WDK libraries, the import libraries are generated from the export tables
@@ -281,7 +284,8 @@ Tested on the console: sound from the speakers.
 
   Headphones are used instead when they are plugged in at boot (PV6, the jack switch).
 - **ACPI** `AUD0` (`SWOA0C01`) with the AHUB and ADMA registers. It has no codec I2C resource,
-  because there is no Windows I2C1 driver yet, so the output does not follow the jack after boot.
+  because there is no Windows I2C1 driver. Instead, our `swbatt` follows the jack while Windows
+  runs: it shares I2C1 with the codec (see Drivers).
 - **Build**: `drivers/build_audio.sh`; **install**: `w64.cmd` from `agent\audio\`.
 
 ## Windows Update
@@ -386,7 +390,7 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 
 - ARM64: cheaper SD capability masking (drop the full SD page trap).
 - USB host (XUSB firmware load in UEFI + inbox XHCI).
-- Audio: follow the headphone jack after boot (needs an I2C1 driver), microphone. Wi-Fi: throughput, sleep, no reboot after a driver update.
+- Audio: microphone. Wi-Fi: throughput, sleep, no reboot after a driver update.
 - ARM32 on 4 cores through the same PSCI trapping (needs an AArch32 trap path).
 - Set `ChildCompletion` in the image build so setup needs no manual step.
 
