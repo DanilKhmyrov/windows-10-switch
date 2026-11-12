@@ -257,7 +257,44 @@ static VOID FlushReports(VOID)
 
 // ---- I2C5 (PMIC, RTC), normal mode, up to 4 bytes; only this driver uses it in Windows ----
 
+// I2C5 is shared with swbatt (the GPU power bridge): one user at a time through a named
+// synchronization event. A wait that times out proceeds, so the buttons never stall for good.
+static PKEVENT g_i2c5Lock;
+static HANDLE g_i2c5LockHandle;
+
+static VOID I2c5LockOpen(VOID)
+{
+    UNICODE_STRING name;
+
+    RtlInitUnicodeString(&name, L"\\BaseNamedObjects\\SwitchWoaI2c5");
+    g_i2c5Lock = IoCreateSynchronizationEvent(&name, &g_i2c5LockHandle);
+}
+
+static VOID I2c5LockClose(VOID)
+{
+    if (g_i2c5LockHandle != NULL)
+        ZwClose(g_i2c5LockHandle);
+    g_i2c5LockHandle = NULL;
+    g_i2c5Lock = NULL;
+}
+
+static BOOLEAN P5XferRaw(UCHAR addr, BOOLEAN read, ULONG *data, ULONG size);
+
 static BOOLEAN P5Xfer(UCHAR addr, BOOLEAN read, ULONG *data, ULONG size)
+{
+    LARGE_INTEGER timeout;
+    BOOLEAN ok;
+
+    timeout.QuadPart = -10000LL * 200;
+    if (g_i2c5Lock != NULL)
+        (VOID) KeWaitForSingleObject(g_i2c5Lock, Executive, KernelMode, FALSE, &timeout);
+    ok = P5XferRaw(addr, read, data, size);
+    if (g_i2c5Lock != NULL)
+        KeSetEvent(g_i2c5Lock, IO_NO_INCREMENT, FALSE);
+    return ok;
+}
+
+static BOOLEAN P5XferRaw(UCHAR addr, BOOLEAN read, ULONG *data, ULONG size)
 {
     ULONG poll;
 
@@ -724,6 +761,7 @@ static VOID StartKeys(VOID)
     LogText("hid: volume buttons ok\r\n");
     address.QuadPart = I2C5_BASE;
     g_i2c5 = MmMapIoSpace(address, I2C5_SIZE, MmNonCached);
+    I2c5LockOpen();
     address.QuadPart = PWM_BASE;
     g_pwm = MmMapIoSpace(address, PWM_SIZE, MmNonCached);
     address.QuadPart = PINMUX_BASE;
@@ -930,6 +968,7 @@ static VOID StopPolling(VOID)
     }
     if (g_i2c5 != NULL) {
         MmUnmapIoSpace((PVOID) g_i2c5, I2C5_SIZE);
+        I2c5LockClose();
         g_i2c5 = NULL;
     }
     if (g_pwm != NULL) {

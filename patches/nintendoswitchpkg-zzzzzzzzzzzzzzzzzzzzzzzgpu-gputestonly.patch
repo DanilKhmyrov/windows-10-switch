@@ -1,0 +1,42 @@
+diff --git a/AcpiTables/Dsdt/Dsdt.asl b/AcpiTables/Dsdt/Dsdt.asl
+--- a/AcpiTables/Dsdt/Dsdt.asl
++++ b/AcpiTables/Dsdt/Dsdt.asl
+@@ -326,6 +326,38 @@
+             Method (_STA, 0, NotSerialized)
+             {
+                 Return (\_SB.XHC0._STA ())
++            }
++        }
++
++
++        // GM20B GPU for the experimental mesa-switch-woa render driver (test builds, GPUTEST=1):
++        // the resources of its platform/t214_resources.h (T214_GPU_*), render only: no POST
++        // framebuffer and no display controller (those stay with the firmware framebuffer), no
++        // LIC routing. The GPU stays in reset and clamped; the driver powers it through swbatt.
++        Device (GPU0)
++        {
++            Name (_HID, "SWOA0F01")
++            Name (_UID, Zero)
++            Name (_CLS, Package () { 0x03, 0x02, Zero })
++            Name (_CRS, ResourceTemplate ()
++            {
++                Memory32Fixed (ReadWrite, 0x57000000, 0x01000000)   // registers
++                Memory32Fixed (ReadWrite, 0x58000000, 0x01000000)   // BAR1
++                Memory32Fixed (ReadWrite, 0x538F0000, 0x00001000)   // aux
++                Memory32Fixed (ReadWrite, 0x60006280, 0x00000018)   // CAR GPU clock/reset
++                Memory32Fixed (ReadWrite, 0x6000667C, 0x00000004)   // CAR PLLP_OUT5
++                Memory32Fixed (ReadWrite, 0x7000E6D4, 0x00000004)   // PMC GPU clamp
++                Memory32Fixed (ReadWrite, 0x70019970, 0x00000008)   // MC flush
++                Memory32Fixed (ReadWrite, 0x70019AA8, 0x00000008)   // MC GPU ASID
++                Memory32Fixed (ReadOnly, 0x70000804, 0x00000004)    // HIDREV
++                Memory32Fixed (ReadOnly, 0x7000F930, 0x00000004)    // fuses
++                Memory32Fixed (ReadOnly, 0x7000FB04, 0x00000004)
++                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 189 }  // stall
++                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 190 }  // nonstall
++            })
++            Method (_STA, 0, NotSerialized)
++            {
++                Return (0x0F)
+             }
+         }
+ 

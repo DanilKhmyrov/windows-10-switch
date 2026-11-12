@@ -76,7 +76,8 @@ llvm-objdump-14 -h tegragpurender-unsigned.sys | grep -q "\.reloc" || { echo "ER
 osslsigncode sign -certs /cert/wifi-chain.crt -key /cert/wifi.key -h sha256 \
     -in tegragpurender-unsigned.sys -out /out/tegragpurender/tegragpurender.sys >/dev/null
 '
-cp "$R/windows/tegragpurender.inf" "$PKG/"
+# DriverVer back-dated as for Wi-Fi: Inf2Cat on the console refuses a date in its future.
+sed 's|^DriverVer=[0-9/]*,|DriverVer=05/02/2022,|' "$R/windows/tegragpurender.inf" > "$PKG/tegragpurender.inf"
 for f in NETB_img.bin fecs.bin gpccs.bin nv_acr_ucode_prod.bin pmu_bl.bin gpmu_ucode_image.bin \
         gpmu_ucode_desc.bin pmu_sig.bin fecs_sig.bin; do
     cp "$FW/$f" "$PKG/"

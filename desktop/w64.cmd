@@ -32,6 +32,7 @@ set WIFIREBOOT=
 call :wifi %1
 call :bt %1
 call :audio %1
+call :gpu %1
 
 rem ---- Drivers: swhid (touch, ACPI\SWTS0001) and swbatt (battery and fan, ROOT\SWBATT) ----
 set REBOOT=
@@ -93,6 +94,7 @@ sc query swbatt >> %LOG% 2>&1
 reg query HKLM\SYSTEM\CurrentControlSet\Enum\HID /s /f SWTS >> %LOG% 2>&1
 copy /y C:\swagent\bat.txt %1:\agent\bat64.txt >nul 2>&1
 powercfg /batteryreport /output %1:\agent\battery64.html >> %LOG% 2>&1
+call :gpureport
 echo -- system >> %LOG%
 wmic cpu get NumberOfLogicalProcessors,CurrentClockSpeed >> %LOG% 2>&1
 wmic OS get FreePhysicalMemory,TotalVisibleMemorySize >> %LOG% 2>&1
@@ -281,6 +283,50 @@ if %errorlevel% equ 3010 echo ok > %AD%\installed-local.ok
 reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWOA0C01" /s >> %LOG% 2>&1
 reg query HKLM\SYSTEM\CurrentControlSet\Services\switchaudio\Parameters >> %LOG% 2>&1
 sc query switchaudio >> %LOG% 2>&1
+goto :eof
+
+rem Experimental GPU (Windows 11 only; ACPI\SWOA0F01 from the GPU test loader): the GM20B render
+rem driver of mesa-switch-woa from agent\gpu (tegragpurender.sys/.inf, tegragpuno3d.dll and the
+rem NVIDIA tegra21x firmware). Catalog and signing as for Wi-Fi; installed once per driver build.
+:gpu
+if not exist %1:\agent\gpu\tegragpurender.inf goto :eof
+if not exist %1:\agent\wifi\inf2cat\Inf2Cat.exe goto :eof
+ver | find "10.0.22" >nul || goto :eof
+echo -- gpu >> %LOG%
+set GD=C:\swagent\gpu
+if exist %GD%\installed-local.ok fc /b %1:\agent\gpu\tegragpurender.sys %GD%\tegragpurender.sys >nul 2>&1 && goto :eof
+if exist %GD% rmdir /s /q %GD%
+mkdir %GD%
+copy /y %1:\agent\gpu\*.* %GD%\ >> %LOG% 2>&1
+%1:\agent\wifi\inf2cat\Inf2Cat.exe /driver:%GD% /os:10_NI_ARM64 >> %LOG% 2>&1
+if not exist %GD%\tegragpurender.cat (
+  echo -- gpu: no catalog >> %LOG%
+  goto :eof
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\wifi\wifi_sign.ps1 %GD%\tegragpurender.cat >> %LOG% 2>&1 || (
+  echo -- gpu: catalog not signed >> %LOG%
+  goto :eof
+)
+pnputil /add-driver %GD%\tegragpurender.inf /install >> %LOG% 2>&1
+echo pnputil exit %errorlevel% >> %LOG%
+if %errorlevel% equ 0 echo ok > %GD%\installed-local.ok
+if %errorlevel% equ 3010 echo ok > %GD%\installed-local.ok
+goto :eof
+
+rem The GPU driver needs swbatt's power bridge, which may start after it at boot: restart the
+rem device once from here, then log its state and the driver's own status values.
+:gpureport
+reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWOA0F01" >nul 2>&1 || goto :eof
+echo -- gpu state >> %LOG%
+pnputil /enum-devices /instanceid "ACPI\SWOA0F01\0" /drivers >> %LOG% 2>&1
+rem Get-PnpDevice reports OK/Error/Unknown in English on every display language.
+powershell -NoProfile -Command "(Get-PnpDevice -InstanceId 'ACPI\SWOA0F01\0').Status" | find "OK" >nul || (
+  echo -- gpu: restarting the device >> %LOG%
+  pnputil /restart-device "ACPI\SWOA0F01\0" >> %LOG% 2>&1
+  timeout /t 15 /nobreak >nul
+  pnputil /enum-devices /instanceid "ACPI\SWOA0F01\0" /drivers >> %LOG% 2>&1
+)
+reg query HKLM\SYSTEM\CurrentControlSet\Services\tegragpurender\Parameters >> %LOG% 2>&1
 goto :eof
 
 rem Windows Update off, on every boot (Windows may turn parts of it back on). A feature update

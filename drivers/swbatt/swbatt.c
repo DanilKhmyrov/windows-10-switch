@@ -20,6 +20,12 @@
 // source (GPIO PX3), VCONN (PK5) and the charger in VBUS mode at 1.3 A, with the BM92T's own
 // over-current protection on. Everything is switched back when the device is removed, on a
 // charger boost fault and when the driver stops.
+// GPU power bridge: the experimental GM20B driver of mesa-switch-woa reaches the GPU rail through
+// \Device\SwitchBacklight (IOCTL 0x222410, struct tg_gpu_pmic_request, as winx's SwitchFan
+// serves it on the Lite). Served here, kernel callers only, and narrowed to what that driver
+// needs: reads of the MAX77812 (0x31/0x33); writes only to M1 (the GPU rail): its voltage
+// (0x23) between 0.6 and 1.05 V and its enable bit in EN_CTRL (0x06), never M3 (DRAM) or M4
+// (CPU). I2C5 is shared with swhid through a named synchronization event.
 #include <ntddk.h>
 #include <batclass.h>
 
@@ -430,6 +436,250 @@ static BOOLEAN CodecMute(UCHAR reg, BOOLEAN mute)
     return Transfer(ADDR_CODEC, FALSE, &data, 3);
 }
 
+// ---- GPU power bridge ---------------------------------------------------------------
+
+#define BRIDGE_IOCTL        0x00222410u     // CTL_CODE(0x22, 0x904, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define BRIDGE_QUERY_ADDRESS 0x100u
+#define BRIDGE_QUERY_PLLP   0x101u
+#define BRIDGE_QUERY_TEMP   0x102u
+#define I2C5_PHYS           0x7000D000ULL
+#define GPU_PMIC_EN_CTRL    0x06
+#define GPU_PMIC_M1_VOUT    0x23
+#define GPU_PMIC_M1_EN      0x01
+#define GPU_M1_MIN          70              // 250 mV + 70 * 5 mV = 0.60 V
+#define GPU_M1_MAX          160             // 1.05 V, the driver's own limit
+
+typedef struct {
+    ULONG address;
+    ULONG reg;
+    ULONG write;
+    ULONG value;
+} BRIDGE_REQUEST;
+
+static PDEVICE_OBJECT g_bridge;
+static volatile ULONG *g_i2c5;
+static PKEVENT g_i2c5Lock;
+static HANDLE g_i2c5LockHandle;
+static UCHAR g_gpuPmic;                     // 0x31 or 0x33 once found
+static volatile LONG g_socC = 255;          // last SoC temperature, 255 = unknown
+
+// The same named event as swhid: one I2C5 user at a time. A wait that times out (another driver
+// stuck) proceeds and is logged rather than blocking the caller for good.
+static VOID I2c5Lock(VOID)
+{
+    LARGE_INTEGER timeout;
+
+    timeout.QuadPart = -10000LL * 200;
+    if (g_i2c5Lock != NULL &&
+            KeWaitForSingleObject(g_i2c5Lock, Executive, KernelMode, FALSE, &timeout) == STATUS_TIMEOUT)
+        LogText("bridge: i2c5 lock timeout\r\n");
+}
+
+static VOID I2c5Unlock(VOID)
+{
+    if (g_i2c5Lock != NULL)
+        KeSetEvent(g_i2c5Lock, IO_NO_INCREMENT, FALSE);
+}
+
+static BOOLEAN P5Xfer(UCHAR addr, BOOLEAN read, ULONG *data, ULONG size)
+{
+    ULONG poll;
+
+    g_i2c5[0x04 / 4] = ((ULONG) addr << 1) | (read ? 1 : 0);
+    if (!read)
+        g_i2c5[0x0C / 4] = *data;
+    g_i2c5[0x00 / 4] = ((size - 1) << 1) | (2 << 12) | (1 << 11) | (read ? (1 << 6) : 0);
+    g_i2c5[0x8C / 4] = (1 << 5) | (1 << 2) | 1;
+    for (poll = 0; poll < 20 && (g_i2c5[0x8C / 4] & 1); poll++)
+        KeStallExecutionProcessor(1);
+    g_i2c5[0x00 / 4] |= 1 << 9;
+    for (poll = 0; g_i2c5[0x1C / 4] & (1 << 8); poll++) {
+        if (poll == 20000)
+            return FALSE;
+        KeStallExecutionProcessor(10);
+    }
+    if (g_i2c5[0x1C / 4] & 0xF)
+        return FALSE;
+    if (read)
+        *data = g_i2c5[0x0C / 4];
+    return TRUE;
+}
+
+static BOOLEAN PmicRead(UCHAR addr, UCHAR reg, UCHAR *value)
+{
+    ULONG data = reg;
+    BOOLEAN ok;
+
+    if (g_i2c5 == NULL)
+        return FALSE;
+    I2c5Lock();
+    ok = P5Xfer(addr, FALSE, &data, 1) && P5Xfer(addr, TRUE, &data, 1);
+    I2c5Unlock();
+    if (ok)
+        *value = (UCHAR) data;
+    return ok;
+}
+
+static BOOLEAN PmicWrite(UCHAR addr, UCHAR reg, UCHAR value)
+{
+    ULONG data = reg | ((ULONG) value << 8);
+    BOOLEAN ok;
+
+    if (g_i2c5 == NULL)
+        return FALSE;
+    I2c5Lock();
+    ok = P5Xfer(addr, FALSE, &data, 2);
+    I2c5Unlock();
+    return ok;
+}
+
+static VOID LogGpu(const CHAR *what, ULONG reg, ULONG value)
+{
+    static const CHAR digits[] = "0123456789ABCDEF";
+    CHAR text[8];
+
+    LogText("bridge: ");
+    LogText(what);
+    text[0] = ' ';
+    text[1] = digits[(reg >> 4) & 0xF];
+    text[2] = digits[reg & 0xF];
+    text[3] = '=';
+    text[4] = digits[(value >> 4) & 0xF];
+    text[5] = digits[value & 0xF];
+    text[6] = 0;
+    LogText(text);
+    LogText("\r\n");
+    SaveLog();
+}
+
+static NTSTATUS BridgeRequest(BRIDGE_REQUEST *r)
+{
+    UCHAR value, now;
+
+    if (r->address == 0) {
+        switch (r->reg) {
+        case BRIDGE_QUERY_ADDRESS:
+            if (g_gpuPmic == 0) {
+                BOOLEAN at31 = PmicRead(0x31, GPU_PMIC_M1_VOUT, &value);
+                BOOLEAN at33 = PmicRead(0x33, GPU_PMIC_M1_VOUT, &value);
+                if (at31 == at33)
+                    return STATUS_DEVICE_NOT_READY;
+                g_gpuPmic = at31 ? 0x31 : 0x33;
+                LogGpu("pmic", 0, g_gpuPmic);
+            }
+            r->value = g_gpuPmic;
+            return STATUS_SUCCESS;
+        case BRIDGE_QUERY_TEMP:
+            r->value = (ULONG) g_socC;
+            return STATUS_SUCCESS;
+        case BRIDGE_QUERY_PLLP: {
+            PHYSICAL_ADDRESS address;
+            volatile ULONG *car;
+
+            address.QuadPart = 0x60006000ULL;
+            car = MmMapIoSpace(address, 0x100, MmNonCached);
+            if (car == NULL)
+                return STATUS_INSUFFICIENT_RESOURCES;
+            r->value = car[0xA0 / 4];
+            MmUnmapIoSpace((PVOID) car, 0x100);
+            return STATUS_SUCCESS;
+        }
+        default:
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+    if (g_gpuPmic == 0 || r->address != g_gpuPmic || r->reg > 0xFF)
+        return STATUS_ACCESS_DENIED;
+    if (!r->write) {
+        if (!PmicRead(g_gpuPmic, (UCHAR) r->reg, &value))
+            return STATUS_IO_DEVICE_ERROR;
+        r->value = value;
+        return STATUS_SUCCESS;
+    }
+    if (r->value > 0xFF)
+        return STATUS_INVALID_PARAMETER;
+    if (r->reg == GPU_PMIC_M1_VOUT) {
+        if (r->value < GPU_M1_MIN || r->value > GPU_M1_MAX) {
+            LogGpu("refused M1 voltage", r->reg, r->value);
+            return STATUS_ACCESS_DENIED;
+        }
+    } else if (r->reg == GPU_PMIC_EN_CTRL) {
+        // Only the M1 enable bit may change; M2-M4 (DRAM, CPU) keep their current state.
+        if (!PmicRead(g_gpuPmic, GPU_PMIC_EN_CTRL, &now))
+            return STATUS_IO_DEVICE_ERROR;
+        if (((now ^ r->value) & ~GPU_PMIC_M1_EN) != 0) {
+            LogGpu("refused EN_CTRL", r->reg, r->value);
+            return STATUS_ACCESS_DENIED;
+        }
+    } else {
+        LogGpu("refused write", r->reg, r->value);
+        return STATUS_ACCESS_DENIED;
+    }
+    if (!PmicWrite(g_gpuPmic, (UCHAR) r->reg, (UCHAR) r->value))
+        return STATUS_IO_DEVICE_ERROR;
+    LogGpu("write", r->reg, r->value);
+    return STATUS_SUCCESS;
+}
+
+// IRP_MJ_CREATE/CLOSE and IRP_MJ_DEVICE_CONTROL on the bridge device. User-mode opens are refused.
+static NTSTATUS BridgeDispatch(PIRP irp)
+{
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(irp);
+    NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+
+    irp->IoStatus.Information = 0;
+    if (stack->MajorFunction == IRP_MJ_CREATE) {
+        status = irp->RequestorMode == KernelMode ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
+    } else if (stack->MajorFunction == IRP_MJ_CLOSE || stack->MajorFunction == IRP_MJ_CLEANUP) {
+        status = STATUS_SUCCESS;
+    } else if (stack->MajorFunction == IRP_MJ_DEVICE_CONTROL &&
+            stack->Parameters.DeviceIoControl.IoControlCode == BRIDGE_IOCTL &&
+            irp->RequestorMode == KernelMode) {
+        if (stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(BRIDGE_REQUEST) ||
+                stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(BRIDGE_REQUEST)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+        } else {
+            status = BridgeRequest((BRIDGE_REQUEST *) irp->AssociatedIrp.SystemBuffer);
+            if (NT_SUCCESS(status))
+                irp->IoStatus.Information = sizeof(BRIDGE_REQUEST);
+        }
+    }
+    irp->IoStatus.Status = status;
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    return status;
+}
+
+static VOID BridgeStart(PDRIVER_OBJECT driver)
+{
+    UNICODE_STRING name, lockName;
+    PHYSICAL_ADDRESS address;
+
+    RtlInitUnicodeString(&lockName, L"\\BaseNamedObjects\\SwitchWoaI2c5");
+    g_i2c5Lock = IoCreateSynchronizationEvent(&lockName, &g_i2c5LockHandle);
+    address.QuadPart = I2C5_PHYS;
+    g_i2c5 = MmMapIoSpace(address, 0x100, MmNonCached);
+    RtlInitUnicodeString(&name, L"\\Device\\SwitchBacklight");
+    if (g_i2c5 == NULL || !NT_SUCCESS(IoCreateDevice(driver, 0, &name, FILE_DEVICE_UNKNOWN,
+            FILE_DEVICE_SECURE_OPEN, FALSE, &g_bridge)))
+        g_bridge = NULL;
+    else
+        g_bridge->Flags &= ~DO_DEVICE_INITIALIZING;
+}
+
+static VOID BridgeStop(VOID)
+{
+    if (g_bridge != NULL)
+        IoDeleteDevice(g_bridge);
+    g_bridge = NULL;
+    if (g_i2c5 != NULL)
+        MmUnmapIoSpace((PVOID) g_i2c5, 0x100);
+    g_i2c5 = NULL;
+    if (g_i2c5LockHandle != NULL)
+        ZwClose(g_i2c5LockHandle);
+    g_i2c5LockHandle = NULL;
+    g_i2c5Lock = NULL;
+}
+
 // ---- USB port power ----------------------------------------------------------------
 
 #define ADDR_PD         0x18            // BM92T36 USB-C / power delivery controller
@@ -796,6 +1046,7 @@ VOID PollThread(PVOID context)
 
         ExAcquireFastMutex(&g_snapLock);
         g_snap = s;
+        InterlockedExchange(&g_socC, s.socDeciC >= 0 ? s.socDeciC / 10 : 255);
         ExReleaseFastMutex(&g_snapLock);
 
         if (g_ext != NULL && g_ext->classData != NULL &&
@@ -1126,6 +1377,8 @@ NTSTATUS DispatchIoctl(PDEVICE_OBJECT device, PIRP irp)
     PDEVICE_EXTENSION ext = device->DeviceExtension;
     NTSTATUS status = STATUS_NOT_SUPPORTED;
 
+    if (device == g_bridge)
+        return BridgeDispatch(irp);
     if (ext->classData != NULL)
         status = BatteryClassIoctl(ext->classData, irp);
     if (status == STATUS_NOT_SUPPORTED) {
@@ -1137,7 +1390,8 @@ NTSTATUS DispatchIoctl(PDEVICE_OBJECT device, PIRP irp)
 
 NTSTATUS DispatchCreateClose(PDEVICE_OBJECT device, PIRP irp)
 {
-    UNREFERENCED_PARAMETER(device);
+    if (device == g_bridge)
+        return BridgeDispatch(irp);
     irp->IoStatus.Information = 0;
     return CompleteIrp(irp, STATUS_SUCCESS);
 }
@@ -1146,6 +1400,8 @@ NTSTATUS DispatchPassDown(PDEVICE_OBJECT device, PIRP irp)
 {
     PDEVICE_EXTENSION ext = device->DeviceExtension;
 
+    if (device == g_bridge)
+        return BridgeDispatch(irp);
     IoSkipCurrentIrpStackLocation(irp);
     return IoCallDriver(ext->lower, irp);
 }
@@ -1178,6 +1434,7 @@ VOID Unload(PDRIVER_OBJECT driver)
 {
     UNREFERENCED_PARAMETER(driver);
     StopPolling();
+    BridgeStop();
 }
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registry)
@@ -1191,8 +1448,10 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registry)
     driver->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DispatchIoctl;
     driver->MajorFunction[IRP_MJ_CREATE] = DispatchCreateClose;
     driver->MajorFunction[IRP_MJ_CLOSE] = DispatchCreateClose;
+    driver->MajorFunction[IRP_MJ_CLEANUP] = DispatchCreateClose;
     driver->MajorFunction[IRP_MJ_SYSTEM_CONTROL] = DispatchPassDown;
     driver->DriverExtension->AddDevice = AddDevice;
     driver->DriverUnload = Unload;
+    BridgeStart(driver);
     return STATUS_SUCCESS;
 }
