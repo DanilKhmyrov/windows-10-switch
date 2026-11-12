@@ -45,7 +45,7 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 | Power button | no | no | short press: screen off/on; held 4 s: Ctrl+Alt+Del screen (power menu); held + volume: brightness |
 | Shut down from Windows | no | the console powers off (shim, PMIC) | the console powers off (shim, PMIC) |
 | Clock | no | no | the PMIC RTC: correct time at boot without network, once Windows has synced once |
-| USB (USB-C port) | no | no | **yes, test entry**: mice, keyboards, flash drives; the port powers OTG devices ([details](#usb-windows-11)) |
+| USB (USB-C port) | no | no | **yes**: a wireless mouse receiver through an OTG adapter, port powered by the console ([details](#usb-windows-11)) |
 | GPU | no | no | no |
 
 Windows 11 24H2 and later will not run: they need ARMv8.1 atomics, which the Cortex-A57 lacks.
@@ -318,8 +318,7 @@ Tested on the console: sound from the speakers.
 The USB-C port is the Tegra XUSB host. The Windows driver is the inbox `USBXHCI`; this repository
 only brings the controller up and powers the port. Tested on the console (Switch OLED): the
 controller shows up without errors, and a wireless mouse receiver in a USB-C OTG adapter works,
-with the port powered by the console. For now this is a separate Hekate entry, **USB Test**
-(`wp11u/`), next to the regular Windows 11 entry.
+with the port powered by the console. Keyboards, flash drives and hubs are not tested yet.
 
 - **Firmware**: the controller runs NVIDIA's Falcon firmware for T210B01, which is not in
   linux-firmware and is not included here. Take `lib/firmware/tegra210b01_xusb_firmware`
@@ -458,8 +457,8 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 ## Roadmap
 
 - ARM64: cheaper SD capability masking (drop the full SD page trap).
-- USB: make it part of the regular Windows 11 entry; install winx's `tegraxusb` for the Falcon
-  mailbox; find what leaves the touch supply at 1.0 V.
+- USB: test more devices (flash drives, hubs, the dock); install winx's `tegraxusb` for the
+  Falcon mailbox. Find what leaves the touch supply at 1.0 V.
 - Audio: microphone. Wi-Fi: throughput, sleep, no reboot after a driver update.
 - ARM32 on 4 cores through the same PSCI trapping (needs an AArch32 trap path).
 - Test `setupwatch.cmd` on a fresh Windows 11 install.
