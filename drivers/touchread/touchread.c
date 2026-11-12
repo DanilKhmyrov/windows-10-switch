@@ -200,17 +200,20 @@ static BOOLEAN InitPanel(VOID)
     UCHAR event[EVENT_SIZE];
     BOOLEAN ready = FALSE;
 
-    if (!Send(reset, sizeof(reset))) {
-        LogText("reset=fail\r\n");
-        return FALSE;
+    // A second reset when the panel does not report ready after the first one.
+    for (ULONG attempt = 0; attempt < 2 && !ready; attempt++) {
+        if (!Send(reset, sizeof(reset))) {
+            LogText("reset=fail\r\n");
+            return FALSE;
+        }
+        SleepMs(RESET_MS);
+        for (ULONG i = 0; i < READY_TRIES && !ready; i++) {
+            ready = ReadAfterCommand(CMD_READ_ONE, event, EVENT_SIZE) && event[0] == EV_READY;
+            if (!ready)
+                SleepMs(READY_MS);
+        }
+        LogText(ready ? "ready=ok\r\n" : "ready=timeout\r\n");
     }
-    SleepMs(RESET_MS);
-    for (ULONG i = 0; i < READY_TRIES && !ready; i++) {
-        ready = ReadAfterCommand(CMD_READ_ONE, event, EVENT_SIZE) && event[0] == EV_READY;
-        if (!ready)
-            SleepMs(READY_MS);
-    }
-    LogText(ready ? "ready=ok\r\n" : "ready=timeout\r\n");
 
     if (!Send(mode, sizeof(mode)) || !Send(senseOn, sizeof(senseOn)) || !Send(clear, sizeof(clear))) {
         LogText("sense=fail\r\n");

@@ -81,6 +81,7 @@ static PVOID g_thread;
 static UCHAR g_report[REPORT_SIZE];
 static LONG g_dirty;
 static volatile ULONG *g_gpio;
+static ULONG g_stats[5];                 // panel reads ok, read failures, events, touch reports, key reports
 static UCHAR g_keyQueue[KEY_QUEUE];      // pending key states, sent before touch reports
 static ULONG g_keyHead, g_keyCount;      // used by the poll thread only
 
@@ -147,6 +148,7 @@ static VOID FlushReports(VOID)
         buffer[1] = g_keyQueue[g_keyHead];
         g_keyHead = (g_keyHead + 1) % KEY_QUEUE;
         g_keyCount--;
+        g_stats[4]++;
         irp->IoStatus.Status = STATUS_SUCCESS;
         irp->IoStatus.Information = KEY_REPORT_SIZE;
         IoCompleteRequest(irp, IO_NO_INCREMENT);
@@ -159,6 +161,7 @@ static VOID FlushReports(VOID)
         return;
     }
     RtlCopyMemory(irp->UserBuffer, g_report, REPORT_SIZE);
+    g_stats[3]++;
     irp->IoStatus.Status = STATUS_SUCCESS;
     irp->IoStatus.Information = REPORT_SIZE;
     IoCompleteRequest(irp, IO_NO_INCREMENT);
@@ -287,10 +290,26 @@ VOID PollThread(PVOID context)
     StartKeys();
     SaveLog();
 
+    ULONG polls = 0;
+
     while (KeWaitForSingleObject(&g_stop, Executive, KernelMode, FALSE, &delay) == STATUS_TIMEOUT) {
         if (ReadAfterCommand(CMD_READ_ALL, events, sizeof(events))) {
-            for (ULONG i = 0; i < STACK_EVENTS && events[i * EVENT_SIZE] != 0; i++)
+            g_stats[0]++;
+            for (ULONG i = 0; i < STACK_EVENTS && events[i * EVENT_SIZE] != 0; i++) {
+                g_stats[2]++;
                 UpdateContact(&events[i * EVENT_SIZE]);
+            }
+        } else {
+            g_stats[1]++;
+        }
+        // Diagnostics: every 10 s during the first 3 minutes, one line in touch.txt.
+        if (++polls % 1000 == 0 && polls <= 18000) {
+            LogText("hid: reads ");
+            for (ULONG i = 0; i < 5; i++) {
+                LogHex(g_stats[i], 8);
+                LogText(i == 4 ? "\r\n" : " ");
+            }
+            SaveLog();
         }
         BuildReport();
         PollKeys();
