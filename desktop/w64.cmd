@@ -204,6 +204,7 @@ rem Reboot once after a new driver: Windows restarts the device in place, and a 
 rem BCM4356 needs the fresh preparation that UEFI does at boot (scan works, joining fails).
 if exist %WD%\installed-local.ok set WIFIREBOOT=1
 :wifireport
+if exist %1:\agent\wifi\wifi_clean.ps1 powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\wifi\wifi_clean.ps1 >> %LOG% 2>&1
 reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWOA0D01" /s >> %LOG% 2>&1
 sc query switchwifi >> %LOG% 2>&1
 pnputil /enum-devices /instanceid "ACPI\SWOA0D01\0" /drivers >> %LOG% 2>&1
