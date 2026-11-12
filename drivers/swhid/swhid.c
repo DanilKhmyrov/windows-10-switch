@@ -7,7 +7,8 @@
 // the same poll and reported as a second top-level collection, Consumer Control (Volume
 // Increment / Decrement), so Windows changes the volume and shows its volume flyout.
 // The power button (MAX77620 ONOFFSTAT EN0 on I2C5) is polled too:
-//   short press: backlight off/on (PWM channel 0, as hekate); touch is ignored while it is off;
+//   short press: screen off/on (the backlight on an LCD console, the panel's own brightness
+//   on an OLED one, as hekate); touch is ignored while it is off;
 //   held 4 s: Ctrl+Alt+Del from a minimal keyboard collection, so Windows shows its security
 //   screen with the power menu (shut down, restart) and a Cancel button;
 //   held with volume up/down: backlight brighter/darker, no volume change.
@@ -40,7 +41,6 @@
 #define PINMUX_BASE     0x70003000ULL
 #define PINMUX_SIZE     0x1000
 #define PINMUX_LCD_BL_PWM (0x1FC / 4)
-#define PINMUX_LCD_BL_EN  (0x200 / 4)
 #define GPIO_PV_CNF     (0x504 / 4)     // bank 5, port V: PV0 = LCD_BL_PWM, PV1 = LCD_BL_EN
 #define GPIO_PV_OE      (0x514 / 4)
 #define GPIO_PV_OUT     (0x524 / 4)
@@ -49,8 +49,23 @@
 #define CAR_CLK_OUT_ENB_L (0x010 / 4)
 #define CLK_L_PWM       (1u << 17)
 #define CAR_RST_DEV_L   (0x004 / 4)
-#define PINMUX_TRISTATE (1u << 4)
-#define PINMUX_PARKED   (1u << 5)        // reset state: the pin does not follow its function
+#define DC_BASE         0x54200000ULL    // display controller A
+#define DC_SIZE         0x1000
+#define DC_CMD_INT_STATUS 0x37           // word indexes, as in hekate's di.h
+#define DC_CMD_INT_ENABLE 0x39
+#define DC_INT_FRAME_END (1u << 1)
+#define DC_BACKLIGHT_LEVEL 0x326         // scratch register B: hekate keeps its OLED duty here
+#define DSI_BASE        0x54300000ULL
+#define DSI_SIZE        0x400
+#define DSI_INCR_SYNCPT_CNTRL 0x1
+#define DSI_INCR_SYNCPT_SOFT_RESET 1u
+#define DSI_WR_DATA     0xA
+#define DSI_VIDEO_MODE_CONTROL 0x4E
+#define DSI_CMD_PKT_VID_ENABLE 1u
+#define DSI_LINE_TYPE_4 (4u << 1)
+#define MIPI_DSI_DCS_LONG_WRITE 0x39u
+#define MIPI_DCS_SET_BRIGHTNESS 0x51u
+#define OLED_LEVEL_MAX  2047             // PANEL_SM_BL_CANDELA_MAX
 #define POWER_EVERY     5                // read the power button every 5 polls (50 ms)
 #define POWER_HOLD_MS   4000
 #define BRIGHT_STEP     16
@@ -142,6 +157,8 @@ static BOOLEAN g_screenOff;
 static ULONG g_duty;                     // backlight duty 0..255 while the screen is on
 static volatile ULONG *g_pinmux;
 static BOOLEAN g_pwmMode;                // LCD_BL_PWM driven by PWM channel 0 (not a GPIO)
+static BOOLEAN g_oled;                   // OLED panel: brightness over DSI, no backlight pins
+static volatile ULONG *g_dc, *g_dsi;
 static ULONG g_sasRelease;               // polls left until the Ctrl+Alt+Del release report
 static ULONG g_keyHead, g_keyCount;      // used by the poll thread only
 
@@ -435,116 +452,129 @@ static VOID ClockLearn(VOID)
 
 // ---- Backlight ---------------------------------------------------------------------
 
-// The backlight pin LCD_BL_PWM (PV0) is found either as a GPIO driven high or with function
-// PWM0 but still parked (pinmux 0x21: the pin ignores the PWM and the panel stays at full
-// brightness). The first time the backlight changes it becomes a real PWM0 output, as in
-// hekate's display_backlight_pwm_init: duty first, then the pin function, then GPIO -> SFIO.
-static BOOLEAN BacklightPwm(VOID)
+// Two kinds of console, told apart by what hekate left behind:
+//   LCD: a WLED driver, enable on PV1 (GPIO output, high) and brightness on LCD_BL_PWM (PV0),
+//        either a GPIO driven high or PWM channel 0;
+//   OLED (HEG-001): hekate configures neither pin; the panel sets its own brightness from the
+//        DCS command SET_BRIGHTNESS, sent over DSI during vertical blanking.
+// Both follow hekate's bdk/display/di.c.
+
+// One DC frame-end interrupt (polled: the interrupt itself stays masked), at most 100 ms.
+static BOOLEAN DcWaitFrameEnd(VOID)
+{
+    g_dc[DC_CMD_INT_STATUS] = DC_INT_FRAME_END;
+    for (ULONG i = 0; i < 2000; i++) {
+        if (g_dc[DC_CMD_INT_STATUS] & DC_INT_FRAME_END)
+            return TRUE;
+        KeStallExecutionProcessor(50);
+    }
+    return FALSE;
+}
+
+// display_dsi_vblank_write(MIPI_DCS_SET_BRIGHTNESS, 2 bytes): the long packet goes out on
+// the 4th line of the next frame, between two frame ends; the video stream is not stopped.
+static BOOLEAN OledBrightness(ULONG duty)
+{
+    ULONG level = duty * OLED_LEVEL_MAX / 255;
+    BOOLEAN ok;
+
+    if (g_dc == NULL || g_dsi == NULL)
+        return FALSE;
+    g_dc[DC_CMD_INT_ENABLE] |= DC_INT_FRAME_END;
+    g_dsi[DSI_VIDEO_MODE_CONTROL] = DSI_CMD_PKT_VID_ENABLE | DSI_LINE_TYPE_4;
+    ok = DcWaitFrameEnd();
+    if (ok) {
+        g_dsi[DSI_WR_DATA] = (3u << 8) | MIPI_DSI_DCS_LONG_WRITE;      // command + 2 bytes
+        g_dsi[DSI_WR_DATA] = MIPI_DCS_SET_BRIGHTNESS | ((level >> 8) << 8) | ((level & 0xFF) << 16);
+        ok = DcWaitFrameEnd();
+        KeStallExecutionProcessor(14);
+        g_dsi[DSI_INCR_SYNCPT_CNTRL] = DSI_INCR_SYNCPT_SOFT_RESET;
+        KeStallExecutionProcessor(300);
+        g_dsi[DSI_INCR_SYNCPT_CNTRL] = 0;
+        KeStallExecutionProcessor(300);
+    }
+    g_dsi[DSI_VIDEO_MODE_CONTROL] = 0;
+    g_dc[DC_CMD_INT_ENABLE] &= ~DC_INT_FRAME_END;
+    g_dc[DC_CMD_INT_STATUS] = DC_INT_FRAME_END;
+    if (!ok)
+        LogText("backlight: no frame end from the display controller\r\n");
+    return ok;
+}
+
+// LCD: display_backlight_pwm_init(), once, the first time the brightness changes. The duty
+// goes in first, and only a PWM that keeps it gets the pin.
+static BOOLEAN LcdPwm(VOID)
 {
     PHYSICAL_ADDRESS address;
     volatile ULONG *car;
     BOOLEAN clock;
+    ULONG csr = PWM_ENABLE | ((g_screenOff ? 0 : g_duty) << 16);
 
     if (g_pwmMode)
         return TRUE;
-    if (g_pwm == NULL || g_pinmux == NULL || g_gpio == NULL) {
-        LogText("backlight: registers not mapped\r\n");
+    if (g_pwm == NULL || g_pinmux == NULL)
         return FALSE;
-    }
     address.QuadPart = CAR_BASE;
     car = MmMapIoSpace(address, 0x100, MmNonCached);
     if (car == NULL)
         return FALSE;
     clock = (car[CAR_CLK_OUT_ENB_L] & CLK_L_PWM) != 0 && !(car[CAR_RST_DEV_L] & CLK_L_PWM);
     MmUnmapIoSpace((PVOID) car, 0x100);
+    if (clock) {
+        g_pwm[PWM_CSR0] = csr;
+        clock = g_pwm[PWM_CSR0] == csr;
+    }
     if (!clock) {
-        LogText("backlight: PWM clock off, left alone\r\n");
+        LogText("backlight: PWM not running, left alone\r\n");
         return FALSE;
     }
-    // Duty first, and only if the PWM really takes it (else the pin would go low for good).
-    g_pwm[PWM_CSR0] = PWM_ENABLE | ((g_screenOff ? 0 : g_duty) << 16);
-    if (g_pwm[PWM_CSR0] != (PWM_ENABLE | ((g_screenOff ? 0 : g_duty) << 16))) {
-        LogText("backlight: PWM does not take the duty, left alone\r\n");
-        return FALSE;
-    }
-    // Function PWM0, driven (not tristate) and out of the parked reset state.
-    g_pinmux[PINMUX_LCD_BL_PWM] =
-        (g_pinmux[PINMUX_LCD_BL_PWM] & ~(3u | PINMUX_TRISTATE | PINMUX_PARKED)) | 1;
+    g_pinmux[PINMUX_LCD_BL_PWM] = (g_pinmux[PINMUX_LCD_BL_PWM] & ~3u) | 1;
     g_gpio[GPIO_PV_CNF] &= ~1u;
     g_pwmMode = TRUE;
-    LogText("backlight: PWM mode, pinmux ");
-    LogHex(g_pinmux[PINMUX_LCD_BL_PWM], 8);
-    LogText("\r\n");
+    LogText("backlight: PWM mode\r\n");
     return TRUE;
 }
 
-static VOID Backlight(ULONG duty)
+// Brightness 0..255 (0: off). FALSE: nothing changed.
+static BOOLEAN BacklightSet(ULONG duty)
 {
-    if (BacklightPwm())
-        g_pwm[PWM_CSR0] = PWM_ENABLE | (duty << 16);
-}
-
-// Screen off/on. With the pin still a GPIO output (hekate's state) this is hekate's own
-// display_backlight(): PV0 low/high; in PWM mode the duty goes to 0 and back. Touch is
-// dropped only while the backlight is really off.
-// LCD_BL_EN (PV1) as a GPIO output, driven high first so the backlight never blinks, and
-// out of the parked/tristate pad state so the level reaches the pin.
-static BOOLEAN BacklightEnablePin(VOID)
-{
-    if (g_gpio == NULL || g_pinmux == NULL)
-        return FALSE;
-    if (!(g_gpio[GPIO_PV_CNF] & 2u) || !(g_gpio[GPIO_PV_OE] & 2u)) {
-        LogText("backlight: enable pin, pinmux ");
-        LogHex(g_pinmux[PINMUX_LCD_BL_EN], 8);
-        g_gpio[GPIO_PV_OUT] |= 2u;
-        g_gpio[GPIO_PV_OE] |= 2u;
-        g_gpio[GPIO_PV_CNF] |= 2u;
-        g_pinmux[PINMUX_LCD_BL_EN] &= ~(PINMUX_TRISTATE | PINMUX_PARKED);
-        LogText(" -> ");
-        LogHex(g_pinmux[PINMUX_LCD_BL_EN], 8);
-        LogText("\r\n");
+    if (g_oled)
+        return OledBrightness(duty);
+    if (!g_pwmMode && (duty == 0 || duty == 255) && (g_gpio[GPIO_PV_CNF] & 1u) && (g_gpio[GPIO_PV_OE] & 1u)) {
+        // display_backlight(): the pin is still a GPIO, low = off, high = full brightness.
+        g_gpio[GPIO_PV_OUT] = duty ? (g_gpio[GPIO_PV_OUT] | 1u) : (g_gpio[GPIO_PV_OUT] & ~1u);
+        return TRUE;
     }
+    if (!LcdPwm())
+        return FALSE;
+    g_pwm[PWM_CSR0] = PWM_ENABLE | (duty << 16);
     return TRUE;
 }
 
+// Screen off/on. Touch is dropped only while the screen is really off.
 static VOID ScreenOn(BOOLEAN on)
 {
-    // The PWM duty alone did not darken the panel (pin unparked, duty 0, screen still lit):
-    // switch the backlight enable as well, as hekate's display_end does.
-    BOOLEAN done = FALSE;
+    BOOLEAN ok = BacklightSet(on ? g_duty : 0);
 
-    if (BacklightEnablePin()) {
-        g_gpio[GPIO_PV_OUT] = on ? (g_gpio[GPIO_PV_OUT] | 2u) : (g_gpio[GPIO_PV_OUT] & ~2u);
-        LogText(on ? "backlight: on\r\n" : "backlight: off\r\n");
-        done = TRUE;
-    }
-    if (!g_pwmMode && g_gpio != NULL && (g_gpio[GPIO_PV_CNF] & 1u) && (g_gpio[GPIO_PV_OE] & 1u)) {
-        g_gpio[GPIO_PV_OUT] = on ? (g_gpio[GPIO_PV_OUT] | 1u) : (g_gpio[GPIO_PV_OUT] & ~1u);
-        done = TRUE;
-    } else if (BacklightPwm()) {
-        g_pwm[PWM_CSR0] = PWM_ENABLE | ((on ? g_duty : 0) << 16);
-        done = TRUE;
-    }
-    if (!done) {
-        LogText("backlight: no way to switch it\r\n");
-        g_screenOff = FALSE;
-        return;
-    }
+    LogText(!ok ? "backlight: cannot switch\r\n" : on ? "backlight: on\r\n" : "backlight: off\r\n");
     SaveLog();
-    g_screenOff = !on;
+    if (ok)
+        g_screenOff = !on;
 }
 
 static VOID Brightness(LONG step)
 {
     LONG duty = (LONG) g_duty + step;
+    ULONG old = g_duty;
 
-    if (!BacklightPwm())
-        return;
     g_duty = (ULONG) (duty < BRIGHT_MIN ? BRIGHT_MIN : duty > 255 ? 255 : duty);
-    g_pwm[PWM_CSR0] = PWM_ENABLE | (g_duty << 16);
-    if (g_screenOff)
-        ScreenOn(TRUE);
-    LogText("backlight: duty ");
+    if (BacklightSet(g_duty)) {
+        g_screenOff = FALSE;
+    } else {
+        g_duty = old;
+        LogText("backlight: cannot change\r\n");
+    }
+    LogText(step > 0 ? "backlight: up, duty " : "backlight: down, duty ");
     LogHex(g_duty, 2);
     LogText("\r\n");
     SaveLog();
@@ -656,25 +686,25 @@ static VOID StartKeys(VOID)
     g_pwm = MmMapIoSpace(address, PWM_SIZE, MmNonCached);
     address.QuadPart = PINMUX_BASE;
     g_pinmux = MmMapIoSpace(address, PINMUX_SIZE, MmNonCached);
-    if (g_pwm != NULL && g_pinmux != NULL) {
-        // Already PWM (hekate's menu ran): keep its duty; GPIO mode means full brightness.
-        // A parked or tristate pin (the reset state) does not follow the PWM at all.
-        g_pwmMode = (g_pinmux[PINMUX_LCD_BL_PWM] & (3u | PINMUX_TRISTATE | PINMUX_PARKED)) == 1 &&
-            !(g_gpio[GPIO_PV_CNF] & 1u);
-        g_duty = g_pwmMode ? (g_pwm[PWM_CSR0] >> 16) & 0xFF : 255;
-        if (g_duty < BRIGHT_MIN)
-            g_duty = 150;
-        LogText("backlight: pinmux ");
-        LogHex(g_pinmux[PINMUX_LCD_BL_PWM], 8);
-        LogText(" pv cnf/oe/out ");
-        LogHex(g_gpio[GPIO_PV_CNF] & 0xFF, 2);
-        LogHex(g_gpio[GPIO_PV_OE] & 0xFF, 2);
-        LogHex(g_gpio[GPIO_PV_OUT] & 0xFF, 2);
-        LogText(" pwm0 ");
-        LogHex(g_pwm[PWM_CSR0], 8);
+    address.QuadPart = DC_BASE;
+    g_dc = MmMapIoSpace(address, DC_SIZE, MmNonCached);
+    address.QuadPart = DSI_BASE;
+    g_dsi = MmMapIoSpace(address, DSI_SIZE, MmNonCached);
+    if (g_pwm != NULL && g_pinmux != NULL && g_dc != NULL && g_dsi != NULL) {
+        // No WLED enable output on PV1: an OLED console, hekate's duty is in the DC scratch
+        // register. LCD: PWM already (hekate's menu ran) keeps its duty, a GPIO is full brightness.
+        g_oled = !(g_gpio[GPIO_PV_CNF] & 2u) || !(g_gpio[GPIO_PV_OE] & 2u);
+        g_pwmMode = !g_oled && (g_pinmux[PINMUX_LCD_BL_PWM] & 3u) == 1 && !(g_gpio[GPIO_PV_CNF] & 1u);
+        g_duty = g_oled ? g_dc[DC_BACKLIGHT_LEVEL] : g_pwmMode ? (g_pwm[PWM_CSR0] >> 16) & 0xFF : 255;
+        LogText(g_oled ? "backlight: oled, duty " : g_pwmMode ? "backlight: lcd pwm, duty " : "backlight: lcd gpio, duty ");
+        LogHex(g_duty, 8);
         LogText("\r\n");
+        if (g_duty < BRIGHT_MIN || g_duty > 255)
+            g_duty = 150;
     } else {
         LogText("backlight: mapping failed\r\n");
+        g_oled = FALSE;
+        g_pwmMode = FALSE;
     }
     ClockStart();
 }
@@ -856,7 +886,16 @@ static VOID StopPolling(VOID)
         MmUnmapIoSpace((PVOID) g_pinmux, PINMUX_SIZE);
         g_pinmux = NULL;
     }
+    if (g_dc != NULL) {
+        MmUnmapIoSpace((PVOID) g_dc, DC_SIZE);
+        g_dc = NULL;
+    }
+    if (g_dsi != NULL) {
+        MmUnmapIoSpace((PVOID) g_dsi, DSI_SIZE);
+        g_dsi = NULL;
+    }
     g_pwmMode = FALSE;
+    g_oled = FALSE;
     g_keyCount = 0;
 
     while ((irp = PopRead()) != NULL) {

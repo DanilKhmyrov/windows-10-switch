@@ -16,7 +16,7 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 | ![ARM32 desktop](docs/screenshots/arm32-desktop.jpg) | ![Windows 10 ARM64 desktop](docs/screenshots/arm64-desktop.jpg) | ![Windows 11 ARM64 desktop](docs/screenshots/win11-arm64-desktop.jpg) |
 
 > **The first rule of this project is not to harm the console.** Everything here was tested on one
-> Mariko unit (T210B01, HAC-001-01). Clock and voltage changes stay within the limits used by
+> Mariko unit (T210B01, the OLED model HEG-001). Clock and voltage changes stay within the limits used by
 > Horizon. Use at your own risk.
 
 > **Experimental, for developers.** This is a research project, not a polished installer.
@@ -140,8 +140,10 @@ test-signed:
 
 - `swhid`: HID touch screen digitizer for the FTS4 panel on I2C3 (up to 5 fingers), plus:
   - the volume buttons (PX6/PX7) as a Consumer Control collection (Volume Increment/Decrement);
-  - the power button (MAX77620 ONOFFSTAT EN0 on I2C5): a short press switches the backlight
-    (PWM channel 0) and ignores touch while it is off; held 4 s it sends Ctrl+Alt+Del from a
+  - the power button (MAX77620 ONOFFSTAT EN0 on I2C5): a short press switches the screen off
+    and on (on the OLED model the panel's own brightness, DCS SET_BRIGHTNESS over DSI as in
+    hekate; on LCD models the backlight PWM, not tested) and ignores touch while it is off;
+    held 4 s it sends Ctrl+Alt+Del from a
     minimal keyboard collection, so Windows shows its security screen with the power menu and a
     Cancel button; held with volume up/down it changes the brightness;
   - the clock: the MAX77620 RTC keeps time while the console is off, but Horizon owns it, so it is
