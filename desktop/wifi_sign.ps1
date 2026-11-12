@@ -20,12 +20,15 @@ $codeSigning = '1.3.6.1.5.5.7.3.3'
 $root = Get-ChildItem Cert:\LocalMachine\My | Where-Object Subject -eq $rootName | Select-Object -First 1
 if ($root -and -not ($root.EnhancedKeyUsageList.ObjectId -contains $codeSigning)) {
     foreach ($store in 'My', 'Root', 'TrustedPublisher') {
-        Get-ChildItem "Cert:\LocalMachine\$store" |
-            Where-Object { $_.Subject -eq $rootName -or $_.Subject -eq $signerName } |
-            Remove-Item -DeleteKey -ErrorAction SilentlyContinue
-        Get-ChildItem "Cert:\LocalMachine\$store" |
-            Where-Object { $_.Subject -eq $rootName -or $_.Subject -eq $signerName } |
-            Remove-Item -ErrorAction SilentlyContinue
+        $old = Get-ChildItem "Cert:\LocalMachine\$store" |
+            Where-Object { $_.Subject -eq $rootName -or $_.Subject -eq $signerName }
+        foreach ($cert in $old) {
+            # -DeleteKey is a certificate-provider parameter: it needs an explicit Cert: path,
+            # and fails for certificates without a private key (the Root and TrustedPublisher copies).
+            $path = "Cert:\LocalMachine\$store\$($cert.Thumbprint)"
+            try { Remove-Item -Path $path -DeleteKey -ErrorAction Stop }
+            catch { Remove-Item -Path $path -ErrorAction SilentlyContinue }
+        }
     }
     "removed the old test certificates (no code-signing usage)"
     $root = $null
