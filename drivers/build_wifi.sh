@@ -9,7 +9,7 @@
 # WDK_C, SDK_C    the "c" folder of the unpacked NuGet packages Microsoft.Windows.WDK.ARM64 and
 #                 Microsoft.Windows.SDK.CPP, version 10.0.26100
 # Needs Homebrew LLVM (clang-cl, llvm-lib) and the switch-wp-drivers Docker image
-# (lld-link, osslsigncode). Signs with drivers/test-cert/wifi.{crt,key}: valid from 2015,
+# (lld-link, osslsigncode). Signs with drivers/test-cert/wifi.{crt,key} (issued by wifi-root.crt): valid from 2015,
 # because the console's clock starts in 2022 after every boot.
 set -euo pipefail
 SRC="$(cd "$1" && pwd)"; WDK="$(cd "$2" && pwd)"; SDK="$(cd "$3" && pwd)"; mkdir -p "$4"; OUT="$(cd "$4" && pwd)"
@@ -53,7 +53,7 @@ lld-link-14 /nologo /driver /subsystem:native,10.0 /machine:arm64 /entry:FxDrive
     $km/ntoskrnl.lib $km/hal.lib
 llvm-objdump-14 -h switchwifi-unsigned.sys | grep -q "\.reloc" || { echo "ERROR: no .reloc section"; exit 1; }
 rm -f /out/switchwifi.sys
-osslsigncode sign -certs /cert/wifi.crt -key /cert/wifi.key -h sha256 -in switchwifi-unsigned.sys -out /out/switchwifi.sys >/dev/null
+osslsigncode sign -certs /cert/wifi-chain.crt -key /cert/wifi.key -h sha256 -in switchwifi-unsigned.sys -out /out/switchwifi.sys >/dev/null
 '
 cp "$PROJECT/drivers/switchwifi/switchwifi.inf" "$OUT/"
 echo "Signed ARM64 driver: $OUT/switchwifi.sys"

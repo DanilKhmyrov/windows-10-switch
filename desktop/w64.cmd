@@ -159,7 +159,7 @@ goto :eof
 
 rem Wi-Fi (Windows 11 only; the device ACPI\SWOA0D01 exists only with a Wi-Fi UEFI build).
 rem Package on the boot partition in agent\wifi: switchwifi.sys/.inf, the board firmware, the
-rem test certificate (wifi.cer, wifi.pfx), wifi_sign.ps1 and Inf2Cat from the WDK (inf2cat\).
+rem test certificates (wifi-root.cer: root, wifi.cer/wifi.pfx: signer), wifi_sign.ps1 and Inf2Cat from the WDK (inf2cat\).
 rem The catalog is made and signed here, then the package is installed with pnputil once per
 rem driver build (marker: the staged copy in C:\swagent\wifi plus installed.ok).
 :wifi
@@ -176,7 +176,7 @@ if exist %WD% rmdir /s /q %WD%
 mkdir %WD%
 copy /y %1:\agent\wifi\switchwifi.inf %WD%\ >> %LOG% 2>&1
 copy /y %1:\agent\wifi\switchwifi.sys %WD%\ >> %LOG% 2>&1
-certutil -addstore -f Root %1:\agent\wifi\wifi.cer >> %LOG% 2>&1
+certutil -addstore -f Root %1:\agent\wifi\wifi-root.cer >> %LOG% 2>&1
 certutil -addstore -f TrustedPublisher %1:\agent\wifi\wifi.cer >> %LOG% 2>&1
 %1:\agent\wifi\inf2cat\Inf2Cat.exe /driver:%WD% /os:10_NI_ARM64 >> %LOG% 2>&1
 if not exist %WD%\switchwifi.cat (
