@@ -56,6 +56,11 @@
 #define SMP_TABLE   TRAP_BASE       // 16 bytes per core: entry point and context_id from Windows
 #define PSCI_CPU_ON64 0xC4000003
 #define PSCI_CPU_ON32 0x84000003
+#define PSCI_SYSTEM_OFF 0x84000008
+#define I2C5_BASE   0x7000D000      // PWR_I2C: MAX77620 PMIC at 0x3C
+#define PMIC_ADDR   0x3C
+#define PMIC_ONOFFCNFG1 0x41
+#define PMIC_ONOFFCNFG2 0x42
 #define UNEXPECTED_COLOR 0xFFFF0080
 #define SHIM_MAGIC  0x5357534D      // reply to the UEFI signal: SMC trapping is on
 #define SMC_TRACE   (TRAP_BASE + 0xF10)  // call counter for the on-screen trace
@@ -402,7 +407,10 @@ el1_sync:
     msr     elr_el2, x5
     ldp     x4, x5, [sp], #16
     eret
-11: mov32   x5, PSCI_CPU_ON64
+11: mov32   x5, PSCI_SYSTEM_OFF
+    cmp     x0, x5
+    b.eq    pmic_off
+    mov32   x5, PSCI_CPU_ON64
     cmp     x0, x5
     b.eq    2f
     mov32   x5, PSCI_CPU_ON32
@@ -430,6 +438,65 @@ el1_sync:
     msr     elr_el2, x5
 4:  ldp     x4, x5, [sp], #16
     eret
+
+// PSCI SYSTEM_OFF (Windows "Shut down"): ATF does not remove power on the Switch (Linux does
+// it in its PMIC driver), so the console stayed on until the 12 s button press. Do what hekate's
+// POWER_OFF_RESET does: ONOFFCNFG2 without the soft-reset, ALARM1 and ALARM2 wake-ups, then
+// ONOFFCNFG1 = SFT_RST (power down, regulators reset). Windows has stopped everything else by
+// now; this never returns.
+pmic_off:
+    mov32   x7, I2C5_BASE
+    mov     w6, #PMIC_ONOFFCNFG2
+    mov     w9, #0                  // write the register address
+    bl      i2c5_xfer
+    mov     w9, #1                  // read one byte
+    bl      i2c5_xfer
+    ldr     w6, [x7, #0x0C]
+    and     w6, w6, #0xFF
+    mov     w10, #0x86              // SFT_RST_WK | WK_ALARM1 | WK_ALARM2
+    bic     w6, w6, w10
+    lsl     w6, w6, #8
+    add     w6, w6, #PMIC_ONOFFCNFG2  // the low byte is 0 after the shift
+    mov     w9, #2                  // write register + value
+    bl      i2c5_xfer
+    mov     w6, #((0x80 << 8) | PMIC_ONOFFCNFG1)
+    mov     w9, #2
+    bl      i2c5_xfer
+1:  wfi
+    b       1b
+
+// One Tegra I2C transfer to the PMIC on I2C5 (x7 = controller, w6 = data, w9: 0 = write
+// 1 byte, 1 = read 1 byte, 2 = write 2 bytes). Same sequence as the UEFI CpuI2c. Clobbers w8, w10.
+i2c5_xfer:
+    mov     w8, #(PMIC_ADDR << 1)
+    cmp     w9, #1
+    cinc    w8, w8, eq              // read: address | 1
+    str     w8, [x7, #0x04]         // CMD_ADDR0
+    str     w6, [x7, #0x0C]         // CMD_DATA1
+    mov     w8, #0x2800             // NEW_MASTER_FSM, debounce
+    cmp     w9, #1
+    b.ne    2f
+    orr     w8, w8, #(1 << 6)       // read
+2:  cmp     w9, #2
+    b.ne    3f
+    orr     w8, w8, #(1 << 1)       // 2 bytes
+3:  str     w8, [x7, #0x00]         // CNFG
+    mov     w8, #0x25
+    str     w8, [x7, #0x8C]         // CONFIG_LOAD
+    mov     w10, #20000
+4:  ldr     w8, [x7, #0x8C]
+    tbz     w8, #0, 5f
+    subs    w10, w10, #1
+    b.ne    4b
+5:  ldr     w8, [x7, #0x00]
+    orr     w8, w8, #(1 << 9)       // GO
+    str     w8, [x7, #0x00]
+    mov32   w10, 0x100000
+6:  ldr     w8, [x7, #0x1C]         // STATUS: busy
+    tbz     w8, #8, 7f
+    subs    w10, w10, #1
+    b.ne    6b
+7:  ret
 
 // A 12x12 square in the trace row. trace_mark takes the next number and paints it red,
 // trace_mark_done repaints the current one green. Clobbers x6 (and x30 via bl), saved by

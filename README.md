@@ -42,7 +42,8 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 | Bluetooth (BCM4356A3 on UART-D) | no | no | **yes**: a Bluetooth mouse works ([details](#bluetooth-windows-11)) |
 | Speaker / headphones (ALC5639 on I2S1) | no | no | **yes**: speaker and headphones, switched when plugged in ([details](#audio-windows-11)) |
 | Volume buttons | no | no | **yes**: Windows volume, with its flyout |
-| Power button | no | no | short press: screen off/on; held 2 s: shut down; held + volume: brightness |
+| Power button | no | no | short press: screen off/on; held 4 s: Ctrl+Alt+Del screen (power menu); held + volume: brightness |
+| Shut down from Windows | no | the console powers off (shim, PMIC) | the console powers off (shim, PMIC) |
 | Clock | no | no | the PMIC RTC: correct time at boot without network, once Windows has synced once |
 | USB, GPU | no | no | no |
 
@@ -71,6 +72,9 @@ Hekate's L4T loader starts `bl33.bin` at 0xAA000000 in EL2. The shim:
   - **stage-2 translation** maps everything 1:1 except the SDMMC page 0x700B0000. Windows
     accesses to it are emulated with the same width and logged, and bit 28 ("64-bit system bus")
     of the SDMMC1 capabilities register is cleared, so `sdbus` uses 32-bit ADMA2 like ARM32 does;
+  - **PSCI SYSTEM_OFF** (Windows shutdown): ATF does not remove power on the Switch, so the shim
+    does what hekate's "Power off" does: over I2C5 it clears the soft-reset and alarm wake-ups in
+    the MAX77620 `ONOFFCNFG2` and writes `ONOFFCNFG1 = SFT_RST`;
   - **SError handling** (`HCR_EL2.AMO`): an asynchronous bus error is swallowed. On the first one,
     ESR, ELR and the latest SD register accesses are drawn as bit rows at the top of the screen.
     This is how the ARM64 hangs below were diagnosed without a UART.
@@ -137,8 +141,9 @@ test-signed:
 - `swhid`: HID touch screen digitizer for the FTS4 panel on I2C3 (up to 5 fingers), plus:
   - the volume buttons (PX6/PX7) as a Consumer Control collection (Volume Increment/Decrement);
   - the power button (MAX77620 ONOFFSTAT EN0 on I2C5): a short press switches the backlight
-    (PWM channel 0) and ignores touch while it is off; held 2 s it sends System Power Down
-    (`w64.cmd` sets that action to shut down); held with volume up/down it changes the brightness;
+    (PWM channel 0) and ignores touch while it is off; held 4 s it sends Ctrl+Alt+Del from a
+    minimal keyboard collection, so Windows shows its security screen with the power menu and a
+    Cancel button; held with volume up/down it changes the brightness;
   - the clock: the MAX77620 RTC keeps time while the console is off, but Horizon owns it, so it is
     never written. Once Windows has a real time (NTP), the offset to the RTC is kept in
     `Services\swhid\Parameters\RtcOffset`, and at every start the system time is set from it.

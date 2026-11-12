@@ -8,7 +8,8 @@
 // Increment / Decrement), so Windows changes the volume and shows its volume flyout.
 // The power button (MAX77620 ONOFFSTAT EN0 on I2C5) is polled too:
 //   short press: backlight off/on (PWM channel 0, as hekate); touch is ignored while it is off;
-//   held 2 s: System Power Down (a third collection), Windows runs its power button action;
+//   held 4 s: Ctrl+Alt+Del from a minimal keyboard collection, so Windows shows its security
+//   screen with the power menu (shut down, restart) and a Cancel button;
 //   held with volume up/down: backlight brighter/darker, no volume change.
 // Clock: the MAX77620 RTC (I2C5, 0x68) keeps running while the console is off. Once Windows
 // has a real time (after NTP), the offset between it and the RTC is kept in
@@ -24,7 +25,8 @@
 #define REPORT_ID_TOUCH 1
 #define REPORT_ID_MAX   2
 #define REPORT_ID_KEYS  3
-#define REPORT_ID_POWER 4
+#define REPORT_ID_SAS   5
+#define SAS_REPORT_SIZE 3
 #define I2C5_BASE       0x7000D000ULL
 #define I2C5_SIZE       0x100
 #define PMIC_ADDR       0x3C
@@ -36,7 +38,7 @@
 #define PWM_CSR0        0                // backlight
 #define PWM_ENABLE      0x80000000u
 #define POWER_EVERY     5                // read the power button every 5 polls (50 ms)
-#define POWER_HOLD_MS   2000
+#define POWER_HOLD_MS   4000
 #define BRIGHT_STEP     16
 #define BRIGHT_MIN      8
 #define CLOCK_EVERY     6000             // learn the RTC offset every 60 s
@@ -93,11 +95,11 @@ static const UCHAR g_reportDescriptor[] = {
     0x09, 0xE9, 0x09, 0xEA, 0x81, 0x02,
     0x95, 0x06, 0x81, 0x03,
     0xC0,
-    // System Control: bit 0 System Power Down.
-    0x05, 0x01, 0x09, 0x80, 0xA1, 0x01,
-    0x85, REPORT_ID_POWER, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01,
-    0x09, 0x81, 0x81, 0x02,
-    0x95, 0x07, 0x81, 0x03,
+    // Keyboard, only for Ctrl+Alt+Del: modifier bits and one key.
+    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
+    0x85, REPORT_ID_SAS, 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+    0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+    0x75, 0x08, 0x95, 0x01, 0x15, 0x00, 0x25, 0x65, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00,
     0xC0
 };
 
@@ -191,11 +193,16 @@ static VOID FlushReports(VOID)
         buffer = (UCHAR *) irp->UserBuffer;
         buffer[0] = g_keyIds[g_keyHead];
         buffer[1] = g_keyQueue[g_keyHead];
+        if (buffer[0] == REPORT_ID_SAS) {
+            // State 1: Left Ctrl + Left Alt, Delete (0x4C); state 0: released.
+            buffer[1] = g_keyQueue[g_keyHead] ? 0x05 : 0;
+            buffer[2] = g_keyQueue[g_keyHead] ? 0x4C : 0;
+        }
         g_keyHead = (g_keyHead + 1) % KEY_QUEUE;
         g_keyCount--;
         g_stats[4]++;
         irp->IoStatus.Status = STATUS_SUCCESS;
-        irp->IoStatus.Information = KEY_REPORT_SIZE;
+        irp->IoStatus.Information = buffer[0] == REPORT_ID_SAS ? SAS_REPORT_SIZE : KEY_REPORT_SIZE;
         IoCompleteRequest(irp, IO_NO_INCREMENT);
     }
     if (InterlockedExchange(&g_dirty, 0) == 0)
@@ -452,8 +459,8 @@ static VOID PollKeys(ULONG polls)
     if (power) {
         powerMs += POLL_MS;
         if (!combo && !powerSent && powerMs >= POWER_HOLD_MS) {
-            QueueReport(REPORT_ID_POWER, 1);
-            QueueReport(REPORT_ID_POWER, 0);
+            QueueReport(REPORT_ID_SAS, 1);
+            QueueReport(REPORT_ID_SAS, 0);
             powerSent = TRUE;
         }
     } else if (powerMs != 0) {
