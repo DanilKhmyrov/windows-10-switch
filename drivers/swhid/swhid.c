@@ -40,7 +40,10 @@
 #define PINMUX_BASE     0x70003000ULL
 #define PINMUX_SIZE     0x1000
 #define PINMUX_LCD_BL_PWM (0x1FC / 4)
-#define GPIO_PV_CNF     (0x504 / 4)     // bank 5, port V: PV0 = LCD_BL_PWM
+#define GPIO_PV_CNF     (0x504 / 4)     // bank 5, port V: PV0 = LCD_BL_PWM, PV1 = LCD_BL_EN
+#define GPIO_PV_OE      (0x514 / 4)
+#define GPIO_PV_OUT     (0x524 / 4)
+#define SAS_HOLD_POLLS  10               // Ctrl+Alt+Del held for 100 ms before the release
 #define CAR_BASE        0x60006000ULL
 #define CAR_CLK_OUT_ENB_L (0x010 / 4)
 #define CLK_L_PWM       (1u << 17)
@@ -133,6 +136,7 @@ static BOOLEAN g_screenOff;
 static ULONG g_duty;                     // backlight duty 0..255 while the screen is on
 static volatile ULONG *g_pinmux;
 static BOOLEAN g_pwmMode;                // LCD_BL_PWM driven by PWM channel 0 (not a GPIO)
+static ULONG g_sasRelease;               // polls left until the Ctrl+Alt+Del release report
 static ULONG g_keyHead, g_keyCount;      // used by the poll thread only
 
 static PDEVICE_OBJECT NextDevice(PDEVICE_OBJECT device)
@@ -436,8 +440,10 @@ static BOOLEAN BacklightPwm(VOID)
 
     if (g_pwmMode)
         return TRUE;
-    if (g_pwm == NULL || g_pinmux == NULL || g_gpio == NULL)
+    if (g_pwm == NULL || g_pinmux == NULL || g_gpio == NULL) {
+        LogText("backlight: registers not mapped\r\n");
         return FALSE;
+    }
     address.QuadPart = CAR_BASE;
     car = MmMapIoSpace(address, 0x100, MmNonCached);
     if (car == NULL)
@@ -448,7 +454,8 @@ static BOOLEAN BacklightPwm(VOID)
         LogText("backlight: PWM clock off, left alone\r\n");
         return FALSE;
     }
-    g_pwm[PWM_CSR0] = PWM_ENABLE | (g_duty << 16);
+    // The screen may be off (PV0 low) at this moment: then start the PWM at 0.
+    g_pwm[PWM_CSR0] = PWM_ENABLE | ((g_screenOff ? 0 : g_duty) << 16);
     g_pinmux[PINMUX_LCD_BL_PWM] = (g_pinmux[PINMUX_LCD_BL_PWM] & ~3u) | 1;
     g_gpio[GPIO_PV_CNF] &= ~1u;
     g_pwmMode = TRUE;
@@ -462,23 +469,32 @@ static VOID Backlight(ULONG duty)
         g_pwm[PWM_CSR0] = PWM_ENABLE | (duty << 16);
 }
 
-// Touch is dropped only while the backlight is really off.
+// Screen off/on. With the pin still a GPIO output (hekate's state) this is hekate's own
+// display_backlight(): PV0 low/high; in PWM mode the duty goes to 0 and back. Touch is
+// dropped only while the backlight is really off.
 static VOID ScreenOn(BOOLEAN on)
 {
-    if (!BacklightPwm()) {
+    if (g_pwmMode && g_pwm != NULL) {
+        g_pwm[PWM_CSR0] = PWM_ENABLE | ((on ? g_duty : 0) << 16);
+    } else if (g_gpio != NULL && (g_gpio[GPIO_PV_CNF] & 1u) && (g_gpio[GPIO_PV_OE] & 1u)) {
+        g_gpio[GPIO_PV_OUT] = on ? (g_gpio[GPIO_PV_OUT] | 1u) : (g_gpio[GPIO_PV_OUT] & ~1u);
+    } else {
+        LogText("backlight: no way to switch it\r\n");
         g_screenOff = FALSE;
         return;
     }
     g_screenOff = !on;
-    Backlight(on ? g_duty : 0);
 }
 
 static VOID Brightness(LONG step)
 {
     LONG duty = (LONG) g_duty + step;
 
+    if (!BacklightPwm())
+        return;
     g_duty = (ULONG) (duty < BRIGHT_MIN ? BRIGHT_MIN : duty > 255 ? 255 : duty);
-    ScreenOn(TRUE);
+    g_pwm[PWM_CSR0] = PWM_ENABLE | (g_duty << 16);
+    g_screenOff = FALSE;
 }
 
 // ---- Buttons -----------------------------------------------------------------------
@@ -495,6 +511,8 @@ static VOID PollKeys(ULONG polls)
 
     if (g_gpio == NULL)
         return;
+    if (g_sasRelease != 0 && --g_sasRelease == 0)
+        QueueReport(REPORT_ID_SAS, 0);
     if (g_i2c5 != NULL && polls % POWER_EVERY == 0) {
         UCHAR status;
 
@@ -509,7 +527,9 @@ static VOID PollKeys(ULONG polls)
         powerMs += POLL_MS;
         if (!combo && !powerSent && powerMs >= POWER_HOLD_MS) {
             QueueReport(REPORT_ID_SAS, 1);
-            QueueReport(REPORT_ID_SAS, 0);
+            g_sasRelease = SAS_HOLD_POLLS;
+            LogText("power: ctrl+alt+del\r\n");
+            SaveLog();
             powerSent = TRUE;
         }
     } else if (powerMs != 0) {
@@ -586,6 +606,17 @@ static VOID StartKeys(VOID)
         g_duty = g_pwmMode ? (g_pwm[PWM_CSR0] >> 16) & 0xFF : 255;
         if (g_duty < BRIGHT_MIN)
             g_duty = 150;
+        LogText("backlight: pinmux ");
+        LogHex(g_pinmux[PINMUX_LCD_BL_PWM], 8);
+        LogText(" pv cnf/oe/out ");
+        LogHex(g_gpio[GPIO_PV_CNF] & 0xFF, 2);
+        LogHex(g_gpio[GPIO_PV_OE] & 0xFF, 2);
+        LogHex(g_gpio[GPIO_PV_OUT] & 0xFF, 2);
+        LogText(" pwm0 ");
+        LogHex(g_pwm[PWM_CSR0], 8);
+        LogText("\r\n");
+    } else {
+        LogText("backlight: mapping failed\r\n");
     }
     ClockStart();
 }
