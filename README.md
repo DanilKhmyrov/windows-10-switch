@@ -40,7 +40,8 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 | Display | GOP framebuffer (Basic Display), portrait | same | same |
 | Wi-Fi (BCM4356 on PCIe) | no | no (WiFiCx needs Windows 11) | **yes**: 2.4 and 5 GHz (802.11ac), WPA2, Internet ([details](#wi-fi-windows-11)) |
 | Bluetooth (BCM4356A3 on UART-D) | no | no | **yes**: a Bluetooth mouse works ([details](#bluetooth-windows-11)) |
-| USB, audio, GPU | no | no | no |
+| Speaker / headphones (ALC5639 on I2S1) | no | no | **yes**: speaker; headphones if plugged in at boot ([details](#audio-windows-11)) |
+| USB, GPU | no | no | no |
 
 Windows 11 24H2 and later will not run: they need ARMv8.1 atomics, which the Cortex-A57 lacks.
 
@@ -95,6 +96,7 @@ only, and `*-cleanonly.patch` only into `CLEAN=1` builds.
 | `*bootopt-a64only` | register "Windows Boot Manager" with a full partition device path; boots the partition holding `\EFI\Boot\bootaa64.efi` |
 | `*win11-win11only` | `WIN11=1` builds (`bl33-64-win11.bin`) boot the partition holding `\EFI\Microsoft\Boot\win11.tag` instead, so both systems can share one card |
 | `*wifi-win11only` | Wi-Fi preparation and the ACPI device `WFI0` (`SWOA0D01`), see [Wi-Fi](#wi-fi-windows-11) |
+| `*audio-win11only` | audio preparation and the ACPI device `AUD0` (`SWOA0C01`), see [Audio](#audio-windows-11) |
 | `*bluetooth-win11only` | Bluetooth preparation and the ACPI device `BTH0` (`SWOA0B01`), see [Bluetooth](#bluetooth-windows-11) |
 
 ### Windows images (`desktop/`)
@@ -141,6 +143,7 @@ image. On ARM64, `w64.cmd` installs both drivers from `agent\arm64\` on the boot
 
 - `switchwifi` (Windows 11 only): see [Wi-Fi](#wi-fi-windows-11).
 - `switchbt` (Windows 11 only): see [Bluetooth](#bluetooth-windows-11).
+- `switchaudio` (Windows 11 only): see [Audio](#audio-windows-11).
 
 ## Getting started: Windows 10 ARM64
 
@@ -261,6 +264,37 @@ mouse pairs and works.
   [CTCaer/switch-l4t-kernel-4.9](https://github.com/CTCaer/switch-l4t-kernel-4.9) (Intel HEX,
   39008 bytes once converted), not redistributed here.
 
+## Audio (Windows 11)
+
+The speaker path goes ADMA -> ADMAIF1 -> XBAR -> I2S1 -> the Realtek ALC5639 codec -> its class D
+amplifier. The Windows driver is **SwitchAudio from the winx project** (`drivers/SwitchAudio`,
+GPL-2.0), a PortCls WaveRT driver that only feeds ADMA; everything else is set up by UEFI.
+Tested on the console: sound from the speakers.
+
+- **UEFI** (`*audio-win11only.patch`, `AudioPrepare` in `SdMmc.c`), ported from the winx Lite
+  audio bring-up. For audio, Switchroot's Iowa (`modin`) and Lite (`vali`) trees are the same:
+  - the audio pads are supplied by SD3 at 1.8 V and set to 1.8 V, as Switchroot does;
+  - the APE partition and clocks are turned on;
+  - the codec gets its power (PZ4) and its Switchroot init list;
+  - I2S1 runs as master at 48 kHz from clk_m;
+  - the speaker volume is -18 dB.
+
+  Headphones are used instead when they are plugged in at boot (PV6, the jack switch).
+- **ACPI** `AUD0` (`SWOA0C01`) with the AHUB and ADMA registers. It has no codec I2C resource,
+  because there is no Windows I2C1 driver yet, so the output does not follow the jack after boot.
+- **Build**: `drivers/build_audio.sh`; **install**: `w64.cmd` from `agent\audio\`.
+
+## Windows Update
+
+`w64.cmd` turns Windows Update off on every boot:
+
+- policies: no automatic updates, the target version pinned to 23H2, no driver updates;
+- `wuauserv`, `UsoSvc` and `WaaSMedicSvc` disabled;
+- the update scheduled tasks disabled.
+
+A feature update to 24H2 or later would not boot on this CPU, and driver updates could replace
+ours.
+
 ## SD card layout (MBR)
 
 `setup_card.py` creates: 1. FAT32 `SWITCH` (Hekate, `wp64/`), 2. FAT32 `WINBOOT` 512 MiB (boot
@@ -352,8 +386,7 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 
 - ARM64: cheaper SD capability masking (drop the full SD page trap).
 - USB host (XUSB firmware load in UEFI + inbox XHCI).
-- Audio. [winx](https://github.com/steck0714/winx) has a GPL-2.0 ARM64 driver for the Lite, to be
-  checked against the Iowa audio path and ported. Wi-Fi: throughput, sleep, no reboot after a driver update.
+- Audio: follow the headphone jack after boot (needs an I2C1 driver), microphone. Wi-Fi: throughput, sleep, no reboot after a driver update.
 - ARM32 on 4 cores through the same PSCI trapping (needs an AArch32 trap path).
 - Set `ChildCompletion` in the image build so setup needs no manual step.
 
@@ -365,8 +398,8 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 - Switchroot / L4T: BL31 and the Mariko BPMP firmware flow.
 - [steck0714/winx](https://github.com/steck0714/winx) and
   [ruje0504-2/Windows-for-Switch-Drivers](https://github.com/ruje0504-2/Windows-for-Switch-Drivers):
-  a parallel Windows 11 effort. **Our Wi-Fi and Bluetooth use their SwitchWifi and
-  SwitchBluetooth drivers** and follow their
+  a parallel Windows 11 effort. **Our Wi-Fi, Bluetooth and audio use their SwitchWifi,
+  SwitchBluetooth and SwitchAudio drivers** and follow their
   port of the Switchroot PCIe bring-up.
 - [CTCaer/switch-l4t-kernel-4.9](https://github.com/CTCaer/switch-l4t-kernel-4.9) and Switchroot's
   device trees: the PCIe, UPHY and Wi-Fi power details and the BCM4356 firmware.

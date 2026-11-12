@@ -27,6 +27,7 @@ rem Player set during setup would count as years old and Windows would force a c
 net accounts /maxpwage:unlimited >> %LOG% 2>&1
 powershell -NoProfile -Command "Get-LocalUser | Where-Object Enabled | Set-LocalUser -PasswordNeverExpires $true" >> %LOG% 2>&1
 call :onedrive
+call :noupdate
 set WIFIREBOOT=
 call :wifi %1
 call :bt %1
@@ -280,4 +281,26 @@ if %errorlevel% equ 3010 echo ok > %AD%\installed-local.ok
 reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWOA0C01" /s >> %LOG% 2>&1
 reg query HKLM\SYSTEM\CurrentControlSet\Services\switchaudio\Parameters >> %LOG% 2>&1
 sc query switchaudio >> %LOG% 2>&1
+goto :eof
+
+rem Windows Update off, on every boot (Windows may turn parts of it back on). A feature update
+rem to 24H2 or later would not boot on the Cortex-A57 (it needs ARMv8.1 atomics), and driver
+rem updates could replace ours. Policies first, then the services and their scheduled tasks.
+:noupdate
+echo -- windows update off >> %LOG%
+set WU=HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate
+reg add %WU% /v TargetReleaseVersion /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+reg add %WU% /v ProductVersion /t REG_SZ /d "Windows 11" /f >> %LOG% 2>&1
+reg add %WU% /v TargetReleaseVersionInfo /t REG_SZ /d 23H2 /f >> %LOG% 2>&1
+reg add %WU% /v ExcludeWUDriversInQualityUpdate /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+reg add %WU% /v DisableWindowsUpdateAccess /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+reg add %WU%\AU /v NoAutoUpdate /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+reg add HKLM\SOFTWARE\Policies\Microsoft\Windows\DriverSearching /v SearchOrderConfig /t REG_DWORD /d 0 /f >> %LOG% 2>&1
+for %%S in (wuauserv UsoSvc) do (
+  sc stop %%S >nul 2>&1
+  sc config %%S start= disabled >> %LOG% 2>&1
+)
+rem The medic service is protected against sc config; its registry value can still be set by SYSTEM.
+reg add HKLM\SYSTEM\CurrentControlSet\Services\WaaSMedicSvc /v Start /t REG_DWORD /d 4 /f >> %LOG% 2>&1
+powershell -NoProfile -Command "foreach ($p in '\Microsoft\Windows\UpdateOrchestrator\', '\Microsoft\Windows\WindowsUpdate\', '\Microsoft\Windows\WaaSMedic\') { Get-ScheduledTask -TaskPath $p -ErrorAction SilentlyContinue | Where-Object State -ne 'Disabled' | ForEach-Object { $t = $_; try { Disable-ScheduledTask -InputObject $t -ErrorAction Stop | Out-Null; 'disabled ' + $t.TaskPath + $t.TaskName } catch { 'kept ' + $t.TaskPath + $t.TaskName } } }" >> %LOG% 2>&1
 goto :eof
