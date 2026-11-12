@@ -64,7 +64,7 @@ index 631b393..d080b22 100644
      } // Scope(_SB)
  }
 diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
-index a670ebd..d77d0a8 100644
+index a670ebd..16afbc3 100644
 --- a/Drivers/SdMmcDxe/SdMmc.c
 +++ b/Drivers/SdMmcDxe/SdMmc.c
 @@ -14,6 +14,7 @@
@@ -75,7 +75,7 @@ index a670ebd..d77d0a8 100644
  #include <Library/ArmLib.h>
  
  #include <Protocol/UBootClockManagement.h>
-@@ -1591,6 +1592,345 @@ Failed:
+@@ -1591,6 +1592,360 @@ Failed:
      RamUs(20000000);
  }
  
@@ -184,23 +184,38 @@ index a670ebd..d77d0a8 100644
 +}
 +
 +// PLLU (480 MHz for UTMI) from the 38.4 MHz crystal, and the UTMI PLL. Running PLLs are kept.
++// Logged: OSC_CTRL, PLLU base/misc and the UTMI PLL registers before any change; *Sub is the
++// step that failed (1: crystal, 2: PLLU lock, 3: UTMI PLL lock).
 +STATIC BOOLEAN
-+XuPlls(VOID)
++XuPlls(UINT32 *Sub)
 +{
++    WpLog(WpRd(XU_CAR, 0x50));
++    WpLog(WpRd(XU_CAR, 0xC0));
++    WpLog(WpRd(XU_CAR, 0xCC));
++    WpLog(WpRd(XU_CAR, 0x480));
++    WpLog(WpRd(XU_CAR, 0x484));
++    WpLog(WpRd(XU_CAR, 0x52C));
++    *Sub = 1;
 +    if ((WpRd(XU_CAR, 0x50) >> 28) != 5) return FALSE;
++    *Sub = 2;
 +    if (!(WpRd(XU_CAR, 0xC0) & BIT27)) {
 +        WpRm(XU_CAR, 0xCC, 0, BIT29);
 +        WpRm(XU_CAR, 0xC0, ~0xFFE00000U, BIT24 | 0x11902);
 +        WpRm(XU_CAR, 0xC0, 0, BIT30);
-+        if (!WpWait(XU_CAR, 0xC0, BIT27, BIT27, 2000)) return FALSE;
++        if (!WpWait(XU_CAR, 0xC0, BIT27, BIT27, 20000)) { WpLog(WpRd(XU_CAR, 0xC0)); return FALSE; }
 +    }
 +    WpRm(XU_CAR, 0xC0, 0, 0x02E00000);
 +    WpRm(XU_CAR, 0xC4, 0, BIT0);
++    *Sub = 3;
 +    if (!(WpRd(XU_CAR, 0x52C) & BIT31)) {
++        // IDDQ under software control and off, as hekate's _xusb_init_phy(): hekate puts the UTMI
++        // PLL back into IDDQ (bits 1:0 = 3) when its USB mass storage mode ends.
++        WpRm(XU_CAR, 0x52C, BIT1 | BIT0, BIT0);
++        RamUs(10);
 +        WpRm(XU_CAR, 0x480, ~0xFF0000FFU, (25U << 16) | BIT8);
 +        WpRm(XU_CAR, 0x488, ~0xFF00003FU, 24U << 18);
 +        WpRm(XU_CAR, 0x484, ~0x07FFA000U, BIT15 | 375U);
-+        if (!WpWait(XU_CAR, 0x52C, BIT31, BIT31, 2000)) return FALSE;
++        if (!WpWait(XU_CAR, 0x52C, BIT31, BIT31, 20000)) { WpLog(WpRd(XU_CAR, 0x52C)); WpLog(WpRd(XU_CAR, 0x484)); return FALSE; }
 +    }
 +    return TRUE;
 +}
@@ -345,7 +360,7 @@ index a670ebd..d77d0a8 100644
 +
 +    // Stage 1: PLLU and the UTMI PLL.
 +    Stage = 0x300 | 1;
-+    if (!XuPlls()) goto Failed;
++    if (!XuPlls(&Id)) { Stage = 0x310 | Id; goto Failed; }
 +    // Stage 2: power partitions, clocks and resets of the host.
 +    Stage = 0x300 | 2;
 +    if (!XuClocks()) goto Failed;
@@ -421,7 +436,7 @@ index a670ebd..d77d0a8 100644
  // Windows has no fan driver, so run the fan at a fixed speed. This repeats
  // what hekate does in fan_set_duty() and regulator_5v_enable().
  #define FAN_DUTY_MAX    236
-@@ -2438,6 +2778,8 @@ SdMmcDxeInitialize
+@@ -2438,6 +2793,8 @@ SdMmcDxeInitialize
  	BtPrepare();
  	// Windows 11 builds: codec, I2S1 and the speaker path for the Windows audio driver.
  	AudioPrepare();
