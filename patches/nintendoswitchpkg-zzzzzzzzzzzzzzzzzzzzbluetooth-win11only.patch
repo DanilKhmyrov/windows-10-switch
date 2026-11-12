@@ -1,0 +1,201 @@
+diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
+--- a/Drivers/SdMmcDxe/SdMmc.c
++++ b/Drivers/SdMmcDxe/SdMmc.c
+@@ -1150,6 +1150,147 @@
+     RamUs(20000000);
+ }
+ 
++// ---- Bluetooth preparation (Windows 11 builds) -------------------------------------------------
++// The BCM4356A3 Bluetooth core sits on UART-D (H4). As Switchroot's Iowa (modin) and Lite (vali)
++// device trees describe it, and as the winx UEFI does for the Lite (R390BluetoothPowerOn): UART-D
++// pins to the controller, PH4 = BT_RST (high = powered), PH3 = AP_WAKE_BT (low = awake), PH5 =
++// BT_WAKE_AP (input). UART-D runs from PLLP at 115200 8N1, the Broadcom ROM default; the chip is
++// powered and must answer HCI_Reset and Read_Local_Version. The Windows driver (ACPI BTH0,
++// SWOA0B01) loads the patch and switches to 3 Mbaud. Only on a failure the values are drawn
++// as rows of squares (see WpDraw) and the boot continues after 20 s.
++#define BT_UARTD            0x70006300
++#define BT_GPIO_PH          0x6000D10C      // bank 1, port H: CNF +0, OE +0x10, OUT +0x20, IN +0x30
++#define BT_GPIO_PI          0x6000D200      // bank 2, port I
++#define BT_UART_LSR_DR      BIT0
++#define BT_UART_LSR_THRE    BIT5
++
++STATIC VOID
++BtGpio(UINTN Port, UINTN Reg, UINT32 Bit, BOOLEAN On)
++{
++    if (On) MmioOr32(Port + Reg, 1U << Bit); else MmioAnd32(Port + Reg, ~(1U << Bit));
++    (VOID) MmioRead32(Port + Reg);
++}
++
++STATIC VOID
++BtSend(CONST UINT8 *Buf, UINTN Len)
++{
++    UINTN I, T;
++
++    for (I = 0; I < Len; I++) {
++        for (T = 0; T < 10000 && !(MmioRead32(BT_UARTD + 0x14) & BT_UART_LSR_THRE); T++) RamUs(1);
++        MmioWrite32(BT_UARTD + 0x00, Buf[I]);
++    }
++}
++
++// One HCI event (04 code len params) within TimeoutMs; returns its length, 0 on a timeout.
++STATIC UINTN
++BtEvent(UINT8 *Buf, UINTN Max, UINT32 TimeoutMs)
++{
++    UINTN Got = 0, Need = 3;
++    UINT32 T;
++
++    for (T = 0; T < TimeoutMs * 100 && Got < Need; ) {
++        if (!(MmioRead32(BT_UARTD + 0x14) & BT_UART_LSR_DR)) { RamUs(10); T++; continue; }
++        UINT8 B = (UINT8) MmioRead32(BT_UARTD + 0x00);
++        T += 9;
++        if (Got == 0 && B != 0x04) continue;
++        if (Got < Max) Buf[Got] = B;
++        if (++Got == 3) Need = 3U + B;
++    }
++    return Got >= Need ? Got : 0;
++}
++
++STATIC VOID
++BtPrepare(VOID)
++{
++    STATIC CONST UINT8 Reset[4] = { 0x01, 0x03, 0x0C, 0x00 };
++    STATIC CONST UINT8 Version[4] = { 0x01, 0x01, 0x10, 0x00 };
++    UINT8 Ev[32], Ame;
++    UINTN Len, I;
++    UINT32 Stage;
++
++    mWpRowCount = 0;
++    Stage = 0x100 | 1;
++    if ((MmioRead32(0x70000804) & 0xFFF0U) != 0x2120U) goto Failed;
++
++    // Stage 2: pins. UART4 (UART-D) TX/RTS out, RX/CTS in with pull-down; PI4-PI7 to the
++    // controller. PH3/PH4 pulled down as outputs, PH5 input; chip held off, AP_WAKE_BT awake.
++    Stage = 0x100 | 2;
++    MmioWrite32(WP_PINMUX + 0x114, 0);
++    MmioWrite32(WP_PINMUX + 0x118, BIT2 | BIT4 | BIT6);
++    MmioWrite32(WP_PINMUX + 0x11C, 0);
++    MmioWrite32(WP_PINMUX + 0x120, BIT2 | BIT4 | BIT6);
++    for (I = 4; I < 8; I++) BtGpio(BT_GPIO_PI, 0x00, (UINT32) I, FALSE);
++    MmioWrite32(WP_PINMUX + 0x1C0, BIT2);
++    MmioWrite32(WP_PINMUX + 0x1C4, BIT2);
++    MmioWrite32(WP_PINMUX + 0x1C8, BIT4 | BIT6);
++    BtGpio(BT_GPIO_PH, 0x20, 4, FALSE);
++    BtGpio(BT_GPIO_PH, 0x20, 3, FALSE);
++    BtGpio(BT_GPIO_PH, 0x10, 4, TRUE);
++    BtGpio(BT_GPIO_PH, 0x10, 3, TRUE);
++    BtGpio(BT_GPIO_PH, 0x10, 5, FALSE);
++    BtGpio(BT_GPIO_PH, 0x00, 4, TRUE);
++    BtGpio(BT_GPIO_PH, 0x00, 3, TRUE);
++    BtGpio(BT_GPIO_PH, 0x00, 5, TRUE);
++    WpMs(20);
++
++    // Stage 3: UART-D clock from PLLP 408 MHz (CLK_SOURCE_UARTD = 0, divisor 221 = 115384 baud).
++    Stage = 0x100 | 3;
++    if (!(MmioRead32(WP_CAR + 0x018) & BIT1) || (MmioRead32(WP_CAR + 0x00C) & BIT1)) {
++        MmioWrite32(WP_CAR + 0x310, BIT1);
++        MmioWrite32(WP_CAR + 0x1C0, 0);
++        MmioWrite32(WP_CAR + 0x330, BIT1);
++        RamUs(10);
++        MmioWrite32(WP_CAR + 0x314, BIT1);
++        RamUs(10);
++    }
++    MmioWrite32(WP_CAR + 0x1C0, 0);
++    RamUs(10);
++    MmioWrite32(BT_UARTD + 0x04, 0);
++    MmioWrite32(BT_UARTD + 0x0C, 0x80);
++    MmioWrite32(BT_UARTD + 0x00, 221 & 0xFF);
++    MmioWrite32(BT_UARTD + 0x04, 221 >> 8);
++    MmioWrite32(BT_UARTD + 0x0C, 0x03);
++    MmioWrite32(BT_UARTD + 0x08, 0x07);
++    MmioWrite32(BT_UARTD + 0x10, 0x02);
++
++    // Stage 4: the 32 kHz low-power clock (PMIC GPIO4 32k-out1), shared with Wi-Fi.
++    Stage = 0x100 | 4;
++    if (!WpPmicRead(0x40, &Ame)) goto Failed;
++    WpLog(Ame);
++    if (!(Ame & BIT4) && !CpuRegWrite(WP_PMIC, 0x40, (UINT8) (Ame | BIT4))) goto Failed;
++
++    // Stage 5: power the chip; the ROM needs some time before it listens.
++    Stage = 0x100 | 5;
++    BtGpio(BT_GPIO_PH, 0x20, 4, TRUE);
++    WpMs(150);
++    for (I = 0; I < 4096 && (MmioRead32(BT_UARTD + 0x14) & BT_UART_LSR_DR); I++) (VOID) MmioRead32(BT_UARTD);
++    BtSend(Reset, sizeof (Reset));
++    Len = BtEvent(Ev, sizeof (Ev), 500);
++    WpLog((UINT32) Len);
++    if (Len < 7) goto Failed;
++
++    // Stage 6: Read_Local_Version (04 0E 0C 01 01 10 status hci_ver ... manufacturer).
++    Stage = 0x100 | 6;
++    BtSend(Version, sizeof (Version));
++    Len = BtEvent(Ev, sizeof (Ev), 500);
++    WpLog((UINT32) Len);
++    if (Len < 15 || Ev[1] != 0x0E || Ev[6] != 0) goto Failed;
++    WpLog(((UINT32) Ev[11] | ((UINT32) Ev[12] << 8)) << 16 | Ev[13] | ((UINT32) Ev[14] << 8));
++
++    // Stage 7: UART-D interrupt (GIC SPI 90, legacy controller bank 2 bit 26) to the CPU as IRQ.
++    Stage = 0x100 | 7;
++    MmioWrite32(0x6000422C, MmioRead32(0x6000422C) & ~BIT26);
++    MmioWrite32(0x6000421C, BIT26);
++    MmioWrite32(0x60004224, BIT26);
++    if (!(MmioRead32(0x60004220) & BIT26)) goto Failed;
++    return;
++
++Failed:
++    WpDraw(Stage, FALSE);
++    RamUs(20000000);
++}
++
+ // Windows has no fan driver, so run the fan at a fixed speed. This repeats
+ // what hekate does in fan_set_duty() and regulator_5v_enable().
+ #define FAN_DUTY_MAX    236
+@@ -1993,6 +2134,8 @@
+ 	StepMark(9, !EFI_ERROR(CpuBoost1428()));
+ 	// Windows 11 builds: prepare the Wi-Fi radio on PCIe for the Windows driver.
+ 	WifiProbe();
++	// Windows 11 builds: power the Bluetooth core and check it answers on UART-D.
++	BtPrepare();
+ 
+ 	Status = TegraMmcInit();
+ 	if (EFI_ERROR(Status)) goto exit;
+diff --git a/AcpiTables/Dsdt/Dsdt.asl b/AcpiTables/Dsdt/Dsdt.asl
+--- a/AcpiTables/Dsdt/Dsdt.asl
++++ b/AcpiTables/Dsdt/Dsdt.asl
+@@ -209,5 +209,37 @@
+             }
+         }
+ 
++        // BCM4356A3 Bluetooth on UART-D (GIC SPI 90 = GSI 122, level high), H4 transport for the
++        // SwitchBluetooth driver (winx project). Prepared by BtPrepare in SdMmc.c; present only
++        // when UEFI left UART-D clocked and out of reset.
++        Device (BTH0)
++        {
++            Name (_HID, "SWOA0B01")
++            Name (_UID, Zero)
++            OperationRegion (BCAR, SystemMemory, 0x60006000, 0x20)
++            Field (BCAR, DWordAcc, NoLock, Preserve)
++            {
++                Offset (0x0C),
++                BRSU, 32,
++                Offset (0x18),
++                BENU, 32
++            }
++
++            Method (_STA, 0, Serialized)
++            {
++                If (((BRSU & 0x02) == Zero) && ((BENU & 0x02) == 0x02))
++                {
++                    Return (0x0F)
++                }
++                Return (Zero)
++            }
++
++            Name (_CRS, ResourceTemplate ()
++            {
++                Memory32Fixed (ReadWrite, 0x70006300, 0x00000040)
++                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x7A }
++            })
++        }
++
+     } // Scope(_SB)
+ }

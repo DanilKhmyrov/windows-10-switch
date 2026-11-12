@@ -29,6 +29,7 @@ powershell -NoProfile -Command "Get-LocalUser | Where-Object Enabled | Set-Local
 call :onedrive
 set WIFIREBOOT=
 call :wifi %1
+call :bt %1
 
 rem ---- Drivers: swhid (touch, ACPI\SWTS0001) and swbatt (battery and fan, ROOT\SWBATT) ----
 set REBOOT=
@@ -209,4 +210,41 @@ reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWOA0D01" /s >> %LOG% 2>&1
 sc query switchwifi >> %LOG% 2>&1
 pnputil /enum-devices /instanceid "ACPI\SWOA0D01\0" /drivers >> %LOG% 2>&1
 netsh wlan show interfaces >> %LOG% 2>&1
+goto :eof
+
+rem Bluetooth (Windows 11 only; ACPI\SWOA0B01 from the Windows 11 UEFI). Package in agent\bt:
+rem switchbt.sys/.inf and the Broadcom patch BCM4356A3.hcd. Catalog and signing as for Wi-Fi
+rem (Inf2Cat from agent\wifi\inf2cat, wifi_sign.ps1); installed once per driver build.
+:bt
+if not exist %1:\agent\bt\switchbt.inf goto :eof
+if not exist %1:\agent\wifi\inf2cat\Inf2Cat.exe goto :eof
+ver | find "10.0.22" >nul || goto :eof
+echo -- bluetooth >> %LOG%
+set BD=C:\swagent\bt
+set FW=C:\Windows\System32\drivers\SwitchWOA
+if not exist %FW% mkdir %FW%
+copy /y %1:\agent\bt\BCM4356A3.hcd %FW%\ >> %LOG% 2>&1
+if exist %BD%\installed-local.ok fc /b %1:\agent\bt\switchbt.sys %BD%\switchbt.sys >nul 2>&1 && goto :btreport
+if exist %BD% rmdir /s /q %BD%
+mkdir %BD%
+copy /y %1:\agent\bt\switchbt.inf %BD%\ >> %LOG% 2>&1
+copy /y %1:\agent\bt\switchbt.sys %BD%\ >> %LOG% 2>&1
+%1:\agent\wifi\inf2cat\Inf2Cat.exe /driver:%BD% /os:10_NI_ARM64 >> %LOG% 2>&1
+if not exist %BD%\switchbt.cat (
+  echo -- bluetooth: no catalog >> %LOG%
+  goto :btreport
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\wifi\wifi_sign.ps1 %BD%\switchbt.cat >> %LOG% 2>&1 || (
+  echo -- bluetooth: catalog not signed >> %LOG%
+  goto :btreport
+)
+pnputil /add-driver %BD%\switchbt.inf /install >> %LOG% 2>&1
+echo pnputil exit %errorlevel% >> %LOG%
+if %errorlevel% equ 0 echo ok > %BD%\installed-local.ok
+if %errorlevel% equ 3010 echo ok > %BD%\installed-local.ok
+:btreport
+reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWOA0B01" /s >> %LOG% 2>&1
+reg query HKLM\SYSTEM\CurrentControlSet\Services\switchbt\Parameters >> %LOG% 2>&1
+sc query switchbt >> %LOG% 2>&1
+sc query bthserv >> %LOG% 2>&1
 goto :eof
