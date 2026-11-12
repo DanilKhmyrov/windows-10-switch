@@ -27,6 +27,7 @@ rem Player set during setup would count as years old and Windows would force a c
 net accounts /maxpwage:unlimited >> %LOG% 2>&1
 powershell -NoProfile -Command "Get-LocalUser | Where-Object Enabled | Set-LocalUser -PasswordNeverExpires $true" >> %LOG% 2>&1
 call :onedrive
+set WIFIREBOOT=
 call :wifi %1
 
 rem ---- Drivers: swhid (touch, ACPI\SWTS0001) and swbatt (battery and fan, ROOT\SWBATT) ----
@@ -77,6 +78,7 @@ if errorlevel 1 if exist C:\Windows\System32\drivers\swbatt.sys (
 )
 sc config TabletInputService start= auto >> %LOG% 2>&1
 sc start TabletInputService >nul 2>&1
+if defined WIFIREBOOT set REBOOT=1
 if defined REBOOT (
   echo ==== DRIVERS INSTALLED, rebooting %time% >> %LOG%
   shutdown /r /t 20 /f >> %LOG% 2>&1
@@ -198,6 +200,9 @@ pnputil /add-driver %WD%\switchwifi.inf /install >> %LOG% 2>&1
 echo pnputil exit %errorlevel% >> %LOG%
 if %errorlevel% equ 0 echo ok > %WD%\installed-local.ok
 if %errorlevel% equ 3010 echo ok > %WD%\installed-local.ok
+rem Reboot once after a new driver: Windows restarts the device in place, and a stopped
+rem BCM4356 needs the fresh preparation that UEFI does at boot (scan works, joining fails).
+if exist %WD%\installed-local.ok set WIFIREBOOT=1
 :wifireport
 reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWOA0D01" /s >> %LOG% 2>&1
 sc query switchwifi >> %LOG% 2>&1

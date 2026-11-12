@@ -38,7 +38,7 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 | Battery, charger, fan, overheat shutdown | yes (`drivers/swbatt`) | yes, same driver built for ARM64 | yes, same ARM64 binary |
 | CPU / RAM clocks | 1785 MHz at 1120 mV / ~1600 MHz | same UEFI code | same UEFI code |
 | Display | GOP framebuffer (Basic Display), portrait | same | same |
-| Wi-Fi (BCM4356 on PCIe) | no | no (WiFiCx needs Windows 11) | **yes**: scan, WPA2, Internet ([details](#wi-fi-windows-11)) |
+| Wi-Fi (BCM4356 on PCIe) | no | no (WiFiCx needs Windows 11) | **yes**: 2.4 and 5 GHz (802.11ac), WPA2, Internet ([details](#wi-fi-windows-11)) |
 | USB, Bluetooth, audio, GPU | no | no | no |
 
 Windows 11 24H2 and later will not run: they need ARMv8.1 atomics, which the Cortex-A57 lacks.
@@ -154,7 +154,7 @@ space.
    Note the four numbers it prints at the end: disk signature, Windows partition start, boot
    partition start, Windows partition size.
 3. **Put Hekate back** onto the `SWITCH` partition (the files from a Hekate release), then unzip
-   `windows-10-switch-arm64-loader-*.zip` from the [Releases](../../releases) page onto it. Copy `bl31.bin`
+   `windows-switch-arm64-loader-*.zip` from the [Releases](../../releases) page onto it (v0.1.x: `windows-10-switch-...`). Copy `bl31.bin`
    from a Switchroot L4T Ubuntu release (`switchroot/ubuntu/bl31.bin`) into `wp64/`.
 4. **Get Windows 10 22H2 ARM64** as an ESD or WIM from Microsoft (for example through UUP dump), and
    find the Pro edition index with `wimlib-imagex info file.esd`.
@@ -169,7 +169,7 @@ space.
    ```bash
    sudo python3 -I desktop/setup_card.py install diskN <size in bytes> /path/to/output
    ```
-   Then unzip `windows-10-switch-arm64-drivers-*.zip` from the Releases page onto the `WINBOOT`
+   Then unzip `windows-switch-arm64-drivers-*.zip` from the Releases page onto the `WINBOOT`
    partition (it creates `agent\arm64\` with the touch and battery drivers). If you built the
    drivers yourself into `drivers/out/arm64/`, `build_w64.sh` has already put them there.
 7. **Boot** *Windows 10 ARM64* from Hekate's Launch menu. The screen stays black for about 10 s,
@@ -201,7 +201,9 @@ The Switch's Wi-Fi is a Broadcom BCM4356 on Tegra PCIe root port 1. The Windows 
 ([ruje0504-2/Windows-for-Switch-Drivers](https://github.com/ruje0504-2/Windows-for-Switch-Drivers),
 `drivers/SwitchWifi`, GPL-2.0), a KMDF/NetAdapterCx/WiFiCx driver. WiFiCx exists only on
 Windows 11, so Windows 10 gets no Wi-Fi. Tested on the console: scan, WPA2-Personal, DHCP and
-Internet. 5 GHz and throughput are not measured yet.
+Internet on 2.4 GHz and on 5 GHz (802.11ac, channel 36). Throughput and sleep are not measured yet.
+After installing or updating the driver the agent reboots once: Windows restarts the device in
+place, and a stopped BCM4356 can still scan but not join until UEFI prepares it again at boot.
 
 What this repository adds:
 
@@ -328,7 +330,7 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 - ARM64: cheaper SD capability masking (drop the full SD page trap).
 - USB host (XUSB firmware load in UEFI + inbox XHCI).
 - Bluetooth and audio. [winx](https://github.com/steck0714/winx) has GPL-2.0 ARM64 drivers for
-  these, to be reviewed and ported. Wi-Fi: 5 GHz, throughput, sleep.
+  these, to be reviewed and ported. Wi-Fi: throughput, sleep, no reboot after a driver update.
 - ARM32 on 4 cores through the same PSCI trapping (needs an AArch32 trap path).
 - Set `ChildCompletion` in the image build so setup needs no manual step.
 
