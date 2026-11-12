@@ -2,8 +2,7 @@
 # Builds the UEFI from scratch and packs it into bl33 together with the shim.
 # If the UEFI build fails or the file was not updated, no bl33 is produced.
 #   ./uefi/build_bl33.sh output.bin          (ARCH=AARCH64: 64-bit UEFI, CLEAN=1: clean screen,
-#                                             WIN11=1: boots the partition marked for Windows 11,
-#                                             WIFI=1: adds the Wi-Fi bring-up patches)
+#                                             WIN11=1: boots the partition marked for Windows 11 and prepares Wi-Fi)
 set -euo pipefail
 OUT="$1"
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -12,7 +11,6 @@ if [ "$ARCH" = ARM ]; then BASE=NintendoSwitch-arm; MODE=chain32; else BASE=Nint
 FD="$PROJECT/uefi/out/$BASE.fd"
 [ "${CLEAN:-0}" = 1 ] && FD="$PROJECT/uefi/out/$BASE-clean.fd"
 [ "${WIN11:-0}" = 1 ] && FD="${FD%.fd}-win11.fd"
-[ "${WIFI:-0}" = 1 ] && FD="${FD%.fd}-wifi.fd"
 STAMP="$(mktemp)"
 LOG="$(mktemp)"
 trap 'rm -f "$STAMP" "$LOG"' EXIT

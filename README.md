@@ -22,7 +22,7 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 > **Experimental, for developers.** This is a research project, not a polished installer.
 > The ARM64 path below is scripted end to end, but so far it has only been run on the author's
 > card, which was set up step by step; the clean-card path was tested on a disk image, not on a
-> second console. Touch works on all three; there is no USB yet. Windows 11 was installed next
+> second console. Touch works on all three, Wi-Fi on Windows 11; there is no USB yet. Windows 11 was installed next
 > to Windows 10 on the test card with `desktop/add_windows_partition.py` (see below).
 > The ARM32 path depends on a rare 15035 build and an IoT Core BCD and is documented for reference.
 
@@ -38,7 +38,8 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 | Battery, charger, fan, overheat shutdown | yes (`drivers/swbatt`) | yes, same driver built for ARM64 | yes, same ARM64 binary |
 | CPU / RAM clocks | 1785 MHz at 1120 mV / ~1600 MHz | same UEFI code | same UEFI code |
 | Display | GOP framebuffer (Basic Display), portrait | same | same |
-| USB, Wi-Fi, Bluetooth, audio, GPU | no | no | no |
+| Wi-Fi (BCM4356 on PCIe) | no | no (WiFiCx needs Windows 11) | **yes**: scan, WPA2, Internet ([details](#wi-fi-windows-11)) |
+| USB, Bluetooth, audio, GPU | no | no | no |
 
 Windows 11 24H2 and later will not run: they need ARMv8.1 atomics, which the Cortex-A57 lacks.
 
@@ -92,6 +93,7 @@ only, and `*-cleanonly.patch` only into `CLEAN=1` builds.
 | `*cca-a64only` | `_CCA = 0` on SDMMC1: Tegra SDMMC DMA does not snoop CPU caches |
 | `*bootopt-a64only` | register "Windows Boot Manager" with a full partition device path; boots the partition holding `\EFI\Boot\bootaa64.efi` |
 | `*win11-win11only` | `WIN11=1` builds (`bl33-64-win11.bin`) boot the partition holding `\EFI\Microsoft\Boot\win11.tag` instead, so both systems can share one card |
+| `*wifi-win11only` | Wi-Fi preparation and the ACPI device `WFI0` (`SWOA0D01`), see [Wi-Fi](#wi-fi-windows-11) |
 
 ### Windows images (`desktop/`)
 
@@ -134,6 +136,8 @@ support ARM64. Instead of WDK libraries, the import libraries are generated from
 of the real ARM64 `ntoskrnl.exe`, `hal.dll`, `battc.sys` and `hidclass.sys` taken from the Windows
 image. On ARM64, `w64.cmd` installs both drivers from `agent\arm64\` on the boot partition, binds
 `ACPI\SWTS0001` and creates `ROOT\SWBATT`, then reboots once.
+
+- `switchwifi` (Windows 11 only): see [Wi-Fi](#wi-fi-windows-11).
 
 ## Getting started: Windows 10 ARM64
 
@@ -188,7 +192,47 @@ Same pipeline as Windows 10 ARM64, with a Windows 11 23H2 ARM64 ESD:
    `HKLM\SYSTEM\Setup\Status\ChildCompletion\setup.exe = 3` and write the hive back in place
    (`replace_extent.py`). Setup then finishes and reaches the desktop.
 4. On the first desktop boot the agent installs the same ARM64 touch and battery drivers and
-   reboots once.
+   reboots once. With the Wi-Fi package in `agent\wifi\` it also installs Wi-Fi (next section).
+
+## Wi-Fi (Windows 11)
+
+The Switch's Wi-Fi is a Broadcom BCM4356 on Tegra PCIe root port 1. The Windows driver is
+**SwitchWifi from the [winx](https://github.com/steck0714/winx) project**
+([ruje0504-2/Windows-for-Switch-Drivers](https://github.com/ruje0504-2/Windows-for-Switch-Drivers),
+`drivers/SwitchWifi`, GPL-2.0), a KMDF/NetAdapterCx/WiFiCx driver. WiFiCx exists only on
+Windows 11, so Windows 10 gets no Wi-Fi. Tested on the console: scan, WPA2-Personal, DHCP and
+Internet. 5 GHz and throughput are not measured yet.
+
+What this repository adds:
+
+- **UEFI** (`*wifi-win11only.patch`, `WifiProbe` in `SdMmc.c`): checks the PMIC rails (LDO1
+  "vdd-pex" at 1.0-1.05 V and SD3 at 1.8 V, as in Switchroot's `tegra210b01-nx-pmic.dtsi`; it
+  turns LDO1 on only when it is off, and never changes SD3), enables the 32 kHz clock, brings up the
+  T210B01 UPHY, PLLE and root port 1, trains the link, assigns the BARs and reads the chip ID.
+  DMA stays off. On success the AFI bypasses the SMMU and SPI 98 is routed to the GIC; on any
+  failure the radio and the port go back into reset and the result is drawn as rows of squares.
+  The sequence follows Switchroot Linux as ported by winx. For Wi-Fi, Switchroot's Iowa (`modin`)
+  and Lite (`vali`) device trees use the same rails, pins and port.
+- **ACPI** `WFI0` (`SWOA0D01`) with the resources and the `WIRS` isolation method the driver
+  expects; `_STA` hides it unless UEFI left the PCIe controller running.
+- **Build**: `drivers/build_wifi.sh` builds `switchwifi.sys` with clang-cl and lld-link against
+  the WDK 10.0.26100 NuGet packages (`Microsoft.Windows.WDK.ARM64`, headers of
+  `Microsoft.Windows.SDK.CPP`) and test-signs it.
+- **Install**: `w64.cmd` copies the board firmware to `System32\drivers\SwitchWOA`, makes the
+  catalog with the WDK's Inf2Cat on the console, signs it with PowerShell and runs `pnputil`.
+
+Put on the boot partition in `agent\wifi\`: `switchwifi.sys`, `switchwifi.inf`,
+`wifi-root.cer`, `wifi.cer`, `wifi.pfx`, `wifi_sign.ps1`, the WDK's `bin\10.0.26100.0\x86\`
+folder as `inf2cat\`, and the firmware `brcmfmac4356A3-pcie.bin` / `brcmfmac4356A3-pcie.txt`.
+The firmware is not in this repository (Cypress license): the `.bin` is in
+[CTCaer/switch-l4t-kernel-4.9](https://github.com/CTCaer/switch-l4t-kernel-4.9)
+(`firmware/brcm/brcmfmac4356A3-pcie.bin.ihex`, convert it from Intel HEX), the `.txt` in
+Switchroot's `nx-firmware`. Set a random locally administered `macaddr=` in the `.txt`: the
+shipped one is the same for every console.
+The private keys are not published: make your own test root and a CA:FALSE code-signing
+certificate issued by it (both valid from before 2022), save them as `drivers/test-cert/wifi-root.*`
+and `wifi.*`, and pack `wifi.pfx` with the password `switch`.
+
 
 ## SD card layout (MBR)
 
@@ -268,6 +312,11 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
   our boot agent installed drivers and rebooted in the middle of the specialize pass, and once
   shutdown starts the registry is read-only (errors 19 and 13 in `setupact.log`). The agent now
   does nothing but log while `HKLM\SYSTEM\Setup\SystemSetupInProgress` is 1.
+- **Wi-Fi package refused by Windows**: the console's clock starts in 2022 after every boot (no RTC
+  driver), so a 2026 `DriverVer` makes Inf2Cat refuse ("postdated DriverVer") and a certificate
+  issued in 2026 is "not yet valid". The INF date is back-dated and the test certificates are
+  valid from 2015. A self-signed CA certificate is also refused as a code signer ("basic
+  constraint extension has not been observed"): use a test root plus a CA:FALSE signer.
 - **ARM64 drivers failed with STATUS_DRIVER_UNABLE_TO_LOAD** (Kernel-PnP event 219): ARM64 code is
   PC-relative, so lld emitted no `.reloc` section, and the kernel will not load a driver it cannot
   relocate. One absolute pointer in the image forces a relocation table.
@@ -275,9 +324,9 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 ## Roadmap
 
 - ARM64: cheaper SD capability masking (drop the full SD page trap).
-- USB host (XUSB firmware load in UEFI + inbox XHCI), then networking.
-- Wi-Fi, Bluetooth and audio. [winx](https://github.com/steck0714/winx) has GPL-2.0 ARM64
-  drivers for these, to be reviewed and ported.
+- USB host (XUSB firmware load in UEFI + inbox XHCI).
+- Bluetooth and audio. [winx](https://github.com/steck0714/winx) has GPL-2.0 ARM64 drivers for
+  these, to be reviewed and ported. Wi-Fi: 5 GHz, throughput, sleep.
 - ARM32 on 4 cores through the same PSCI trapping (needs an AArch32 trap path).
 - Set `ChildCompletion` in the image build so setup needs no manual step.
 
@@ -287,7 +336,12 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
   [EDK2](https://github.com/tianocore/edk2): the UEFI this is built on.
 - [CTCaer/hekate](https://github.com/CTCaer/hekate): bootloader, L4T loader, SDMMC and BPMP know-how.
 - Switchroot / L4T: BL31 and the Mariko BPMP firmware flow.
-- [steck0714/winx](https://github.com/steck0714/winx): a parallel effort with Windows 11 ARM64 drivers.
+- [steck0714/winx](https://github.com/steck0714/winx) and
+  [ruje0504-2/Windows-for-Switch-Drivers](https://github.com/ruje0504-2/Windows-for-Switch-Drivers):
+  a parallel Windows 11 effort. **Our Wi-Fi uses their SwitchWifi driver** and follows their
+  port of the Switchroot PCIe bring-up.
+- [CTCaer/switch-l4t-kernel-4.9](https://github.com/CTCaer/switch-l4t-kernel-4.9) and Switchroot's
+  device trees: the PCIe, UPHY and Wi-Fi power details and the BCM4356 firmware.
 
 ## License
 

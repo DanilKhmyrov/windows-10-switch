@@ -1,20 +1,19 @@
 diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
 --- a/Drivers/SdMmcDxe/SdMmc.c
 +++ b/Drivers/SdMmcDxe/SdMmc.c
-@@ -576,6 +576,578 @@
-     __asm__ volatile("mrs x0, actlr_el1" : "+r"(X0) : : "memory");
+@@ -577,6 +577,579 @@
  }
  #endif
-+
-+// ---- Wi-Fi bring-up probe (WIFI=1 test builds only) -------------------------------------------
+ 
++// ---- Wi-Fi preparation (Windows 11 builds) ------------------------------------------------------
 +// Powers the BCM4356 Wi-Fi radio, brings up the Tegra PCIe root port 1 (pci@2,0, UPHY lane
 +// pcie-0), assigns the endpoint BARs and reads the Broadcom chip ID through the BAR0 backplane
 +// window. No firmware is loaded and bus mastering (DMA) stays off: the Windows driver (ACPI
 +// WFI0, SWOA0D01) takes the prepared endpoint over. On success the AFI DMA path bypasses the
 +// SMMU and the legacy interrupt controller forwards SPI 98 to the GIC. On any failure the radio
 +// and the PCIe port go back into reset, which also hides WFI0 (its _STA checks those resets).
-+// The results are drawn as rows of squares (white = 1, grey = 0, most significant bit first);
-+// the boot continues after 5 s, or after 20 s when something failed.
++// Only on a failure the results are drawn as rows of squares (white = 1, grey = 0, most
++// significant bit first) and the boot continues after 20 s; a success leaves the screen alone.
 +//
 +// The sequence follows Switchroot Linux (pci-tegra.c, xusb-tegra210.c, clk-tegra210b01.c,
 +// tegra210b01-nx-pmic.dtsi: LDO1 = 1.0 V "vdd-pex", SD3 = 1.8 V) as ported by the winx project
@@ -573,18 +572,20 @@ diff --git a/Drivers/SdMmcDxe/SdMmc.c b/Drivers/SdMmcDxe/SdMmc.c
 +    Ok = TRUE;
 +
 +Done:
-+    if (Powered && !Ok) WpOff(LinkUp);
++    if (Ok) return;
++    if (Powered) WpOff(LinkUp);
 +    WpDraw(Stage, Ok);
-+    RamUs(Ok ? 5000000 : 20000000);
++    RamUs(20000000);
 +}
- 
++
  // Windows has no fan driver, so run the fan at a fixed speed. This repeats
  // what hekate does in fan_set_duty() and regulator_5v_enable().
-@@ -1418,6 +1990,8 @@
+ #define FAN_DUTY_MAX    236
+@@ -1418,6 +1991,8 @@
  	StepMark(3, !EFI_ERROR(BpmpEmcRaise(1600000)));
  	// A failed CPU switch leaves the old clock and voltage; boot continues either way.
  	StepMark(9, !EFI_ERROR(CpuBoost1428()));
-+	// Wi-Fi builds only: prepare the Wi-Fi radio on PCIe for the Windows driver.
++	// Windows 11 builds: prepare the Wi-Fi radio on PCIe for the Windows driver.
 +	WifiProbe();
  
  	Status = TegraMmcInit();
@@ -909,7 +910,7 @@ diff --git a/AcpiTables/Dsdt/Dsdt.asl b/AcpiTables/Dsdt/Dsdt.asl
 +            }
 +        }
 +
-+        // BCM4356 Wi-Fi on Tegra PCIe root port 1, prepared by UEFI (WifiProbe in SdMmc.c). The
++        // BCM4356 Wi-Fi on Tegra PCIe root port 1, prepared by UEFI (WifiProbe in SdMmc.c, Windows 11 builds). The
 +        // resources are the contract of the SwitchWifi driver (winx project, tegra_resources.h):
 +        // PCIe host/AFI registers, the endpoint configuration window, the outbound memory
 +        // aperture and the legacy INTx (GIC SPI 98). Present only when UEFI left the PCIe
