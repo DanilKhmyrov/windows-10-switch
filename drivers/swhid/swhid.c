@@ -37,6 +37,13 @@
 #define PWM_SIZE        0x100
 #define PWM_CSR0        0                // backlight
 #define PWM_ENABLE      0x80000000u
+#define PINMUX_BASE     0x70003000ULL
+#define PINMUX_SIZE     0x1000
+#define PINMUX_LCD_BL_PWM (0x1FC / 4)
+#define GPIO_PV_CNF     (0x504 / 4)     // bank 5, port V: PV0 = LCD_BL_PWM
+#define CAR_BASE        0x60006000ULL
+#define CAR_CLK_OUT_ENB_L (0x010 / 4)
+#define CLK_L_PWM       (1u << 17)
 #define POWER_EVERY     5                // read the power button every 5 polls (50 ms)
 #define POWER_HOLD_MS   4000
 #define BRIGHT_STEP     16
@@ -124,6 +131,8 @@ static volatile ULONG *g_i2c5;
 static volatile ULONG *g_pwm;
 static BOOLEAN g_screenOff;
 static ULONG g_duty;                     // backlight duty 0..255 while the screen is on
+static volatile ULONG *g_pinmux;
+static BOOLEAN g_pwmMode;                // LCD_BL_PWM driven by PWM channel 0 (not a GPIO)
 static ULONG g_keyHead, g_keyCount;      // used by the poll thread only
 
 static PDEVICE_OBJECT NextDevice(PDEVICE_OBJECT device)
@@ -416,14 +425,50 @@ static VOID ClockLearn(VOID)
 
 // ---- Backlight ---------------------------------------------------------------------
 
+// hekate leaves the backlight pin LCD_BL_PWM (PV0) as a GPIO driven high (full brightness) and
+// only switches it to PWM0 in its own menu (display_backlight_pwm_init). Do the same once, the
+// first time the backlight changes: duty first, then the pin function, then GPIO -> SFIO.
+static BOOLEAN BacklightPwm(VOID)
+{
+    PHYSICAL_ADDRESS address;
+    volatile ULONG *car;
+    BOOLEAN clock;
+
+    if (g_pwmMode)
+        return TRUE;
+    if (g_pwm == NULL || g_pinmux == NULL || g_gpio == NULL)
+        return FALSE;
+    address.QuadPart = CAR_BASE;
+    car = MmMapIoSpace(address, 0x100, MmNonCached);
+    if (car == NULL)
+        return FALSE;
+    clock = (car[CAR_CLK_OUT_ENB_L] & CLK_L_PWM) != 0;
+    MmUnmapIoSpace((PVOID) car, 0x100);
+    if (!clock) {
+        LogText("backlight: PWM clock off, left alone\r\n");
+        return FALSE;
+    }
+    g_pwm[PWM_CSR0] = PWM_ENABLE | (g_duty << 16);
+    g_pinmux[PINMUX_LCD_BL_PWM] = (g_pinmux[PINMUX_LCD_BL_PWM] & ~3u) | 1;
+    g_gpio[GPIO_PV_CNF] &= ~1u;
+    g_pwmMode = TRUE;
+    LogText("backlight: PWM mode\r\n");
+    return TRUE;
+}
+
 static VOID Backlight(ULONG duty)
 {
-    if (g_pwm != NULL)
+    if (BacklightPwm())
         g_pwm[PWM_CSR0] = PWM_ENABLE | (duty << 16);
 }
 
+// Touch is dropped only while the backlight is really off.
 static VOID ScreenOn(BOOLEAN on)
 {
+    if (!BacklightPwm()) {
+        g_screenOff = FALSE;
+        return;
+    }
     g_screenOff = !on;
     Backlight(on ? g_duty : 0);
 }
@@ -457,6 +502,10 @@ static VOID PollKeys(ULONG polls)
             power = (status & PMIC_EN0) != 0;
     }
     if (power) {
+        if (powerMs == 0) {
+            LogText("power: down\r\n");
+            SaveLog();
+        }
         powerMs += POLL_MS;
         if (!combo && !powerSent && powerMs >= POWER_HOLD_MS) {
             QueueReport(REPORT_ID_SAS, 1);
@@ -464,6 +513,10 @@ static VOID PollKeys(ULONG polls)
             powerSent = TRUE;
         }
     } else if (powerMs != 0) {
+        LogText("power: up after ");
+        LogHex(powerMs, 5);
+        LogText(combo ? " ms, brightness\r\n" : powerSent ? " ms, ctrl+alt+del\r\n" : " ms, screen\r\n");
+        SaveLog();
         if (!combo && !powerSent)
             ScreenOn(g_screenOff);
         powerMs = 0;
@@ -525,8 +578,12 @@ static VOID StartKeys(VOID)
     g_i2c5 = MmMapIoSpace(address, I2C5_SIZE, MmNonCached);
     address.QuadPart = PWM_BASE;
     g_pwm = MmMapIoSpace(address, PWM_SIZE, MmNonCached);
-    if (g_pwm != NULL) {
-        g_duty = (g_pwm[PWM_CSR0] >> 16) & 0xFF;
+    address.QuadPart = PINMUX_BASE;
+    g_pinmux = MmMapIoSpace(address, PINMUX_SIZE, MmNonCached);
+    if (g_pwm != NULL && g_pinmux != NULL) {
+        // Already PWM (hekate's menu ran): keep its duty; GPIO mode means full brightness.
+        g_pwmMode = (g_pinmux[PINMUX_LCD_BL_PWM] & 3u) == 1 && !(g_gpio[GPIO_PV_CNF] & 1u);
+        g_duty = g_pwmMode ? (g_pwm[PWM_CSR0] >> 16) & 0xFF : 255;
         if (g_duty < BRIGHT_MIN)
             g_duty = 150;
     }
@@ -689,6 +746,11 @@ static VOID StopPolling(VOID)
         MmUnmapIoSpace((PVOID) g_pwm, PWM_SIZE);
         g_pwm = NULL;
     }
+    if (g_pinmux != NULL) {
+        MmUnmapIoSpace((PVOID) g_pinmux, PINMUX_SIZE);
+        g_pinmux = NULL;
+    }
+    g_pwmMode = FALSE;
     g_keyCount = 0;
 
     while ((irp = PopRead()) != NULL) {
