@@ -1,8 +1,8 @@
 # Signs the driver catalog made by Inf2Cat on the console itself. Called by w64.cmd.
 #   powershell -NoProfile -ExecutionPolicy Bypass -File wifi_sign.ps1 CATALOG
 #
-# The console makes its own test certificates the first time: a root (trusted in
-# LocalMachine\Root) and a code-signing certificate issued by it (trusted in
+# The console makes its own test certificates the first time: a root limited to code signing
+# (trusted in LocalMachine\Root) and a code-signing certificate issued by it (trusted in
 # TrustedPublisher). Their private keys are created here, are not exportable and never leave
 # the console, so no signing key is shipped with the project. Both are valid from 2015
 # because the console's clock starts in 2022 after every boot.
@@ -13,18 +13,36 @@ $to = [datetime]::new(2045, 12, 31)
 $rootName = 'CN=Switch Windows Local Test Root'
 $signerName = 'CN=Switch Windows Local Test Driver'
 
+$codeSigning = '1.3.6.1.5.5.7.3.3'
+
+# A root made by the first version of this script carried New-SelfSignedCertificate's default
+# TLS usages, so it could not vouch for code signing: remove it and its signer everywhere.
 $root = Get-ChildItem Cert:\LocalMachine\My | Where-Object Subject -eq $rootName | Select-Object -First 1
+if ($root -and -not ($root.EnhancedKeyUsageList.ObjectId -contains $codeSigning)) {
+    foreach ($store in 'My', 'Root', 'TrustedPublisher') {
+        Get-ChildItem "Cert:\LocalMachine\$store" |
+            Where-Object { $_.Subject -eq $rootName -or $_.Subject -eq $signerName } |
+            Remove-Item -DeleteKey -ErrorAction SilentlyContinue
+        Get-ChildItem "Cert:\LocalMachine\$store" |
+            Where-Object { $_.Subject -eq $rootName -or $_.Subject -eq $signerName } |
+            Remove-Item -ErrorAction SilentlyContinue
+    }
+    "removed the old test certificates (no code-signing usage)"
+    $root = $null
+}
 if (-not $root) {
-    $root = New-SelfSignedCertificate -Subject $rootName -CertStoreLocation Cert:\LocalMachine\My `
-        -KeyUsage CertSign, CRLSign -KeyExportPolicy NonExportable -KeyAlgorithm RSA -KeyLength 2048 `
-        -TextExtension @('2.5.29.19={critical}{text}ca=1&pathlength=0') -NotBefore $from -NotAfter $to
+    $root = New-SelfSignedCertificate -Type Custom -Subject $rootName -CertStoreLocation Cert:\LocalMachine\My `
+        -KeyUsage CertSign, CRLSign, DigitalSignature -KeyExportPolicy NonExportable -KeyAlgorithm RSA -KeyLength 2048 `
+        -TextExtension @('2.5.29.19={critical}{text}ca=1&pathlength=0', "2.5.29.37={text}$codeSigning") `
+        -NotBefore $from -NotAfter $to
     "created $rootName"
 }
 $signer = Get-ChildItem Cert:\LocalMachine\My | Where-Object Subject -eq $signerName | Select-Object -First 1
 if (-not $signer) {
-    $signer = New-SelfSignedCertificate -Subject $signerName -CertStoreLocation Cert:\LocalMachine\My `
-        -Signer $root -Type CodeSigningCert -KeyExportPolicy NonExportable -KeyAlgorithm RSA -KeyLength 2048 `
-        -TextExtension @('2.5.29.19={critical}{text}ca=0') -NotBefore $from -NotAfter $to
+    $signer = New-SelfSignedCertificate -Type Custom -Subject $signerName -CertStoreLocation Cert:\LocalMachine\My `
+        -Signer $root -KeyUsage DigitalSignature -KeyExportPolicy NonExportable -KeyAlgorithm RSA -KeyLength 2048 `
+        -TextExtension @('2.5.29.19={critical}{text}ca=0', "2.5.29.37={text}$codeSigning") `
+        -NotBefore $from -NotAfter $to
     "created $signerName"
 }
 

@@ -188,11 +188,11 @@ certutil -delstore TrustedPublisher "Switch Windows Test Driver" >> %LOG% 2>&1
 %1:\agent\wifi\inf2cat\Inf2Cat.exe /driver:%WD% /os:10_NI_ARM64 >> %LOG% 2>&1
 if not exist %WD%\switchwifi.cat (
   echo -- wifi: no catalog >> %LOG%
-  goto :eof
+  goto :wifireport
 )
 powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\wifi\wifi_sign.ps1 %WD%\switchwifi.cat >> %LOG% 2>&1 || (
   echo -- wifi: catalog not signed >> %LOG%
-  goto :eof
+  goto :wifireport
 )
 pnputil /add-driver %WD%\switchwifi.inf /install >> %LOG% 2>&1
 echo pnputil exit %errorlevel% >> %LOG%
@@ -201,5 +201,6 @@ if %errorlevel% equ 3010 echo ok > %WD%\installed-local.ok
 :wifireport
 reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWOA0D01" /s >> %LOG% 2>&1
 sc query switchwifi >> %LOG% 2>&1
+pnputil /enum-devices /instanceid "ACPI\SWOA0D01\0" /drivers >> %LOG% 2>&1
 netsh wlan show interfaces >> %LOG% 2>&1
 goto :eof
