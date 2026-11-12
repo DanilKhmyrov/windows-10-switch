@@ -45,7 +45,8 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 | Power button | no | no | short press: screen off/on; held 4 s: Ctrl+Alt+Del screen (power menu); held + volume: brightness |
 | Shut down from Windows | no | the console powers off (shim, PMIC) | the console powers off (shim, PMIC) |
 | Clock | no | no | the PMIC RTC: correct time at boot without network, once Windows has synced once |
-| USB, GPU | no | no | no |
+| USB (USB-C port) | no | no | **yes, test entry**: mice, keyboards, flash drives; the port powers OTG devices ([details](#usb-windows-11)) |
+| GPU | no | no | no |
 
 Windows 11 24H2 and later will not run: they need ARMv8.1 atomics, which the Cortex-A57 lacks.
 
@@ -105,6 +106,7 @@ only, and `*-cleanonly.patch` only into `CLEAN=1` builds.
 | `*wifi-win11only` | Wi-Fi preparation and the ACPI device `WFI0` (`SWOA0D01`), see [Wi-Fi](#wi-fi-windows-11) |
 | `*audio-win11only` | audio preparation and the ACPI device `AUD0` (`SWOA0C01`), see [Audio](#audio-windows-11) |
 | `*bluetooth-win11only` | Bluetooth preparation and the ACPI device `BTH0` (`SWOA0B01`), see [Bluetooth](#bluetooth-windows-11) |
+| `*usb-win11only` | XUSB host preparation and the ACPI devices `XHC0` (`PNP0D10`) and `XFW0` (`SWOA0D02`), see [USB](#usb-windows-11) |
 
 ### Windows images (`desktop/`)
 
@@ -150,9 +152,14 @@ test-signed:
     never written. Once Windows has a real time (NTP), the offset to the RTC is kept in
     `Services\swhid\Parameters\RtcOffset`, and at every start the system time is set from it.
     Without this, Windows starts in 2022 (the UEFI clock) until it reaches the network;
+  - the touch supply: PMIC LDO6 must be 2.9 V ("vdd-tp-2v9" in Switchroot). It was sometimes
+    found at 1.0 V, where the panel answers on I2C but never senses anything. The driver sets
+    2.9 V before it starts the panel, and power-cycles the panel (LDO6 and reset PJ7) when it does
+    not report ready;
 - `swbatt`: battery class miniport (MAX17050 fuel gauge, BQ24193 charger, TMP451 temperature),
   fan curve and overheat shutdown; on Windows 11 also the headphone jack (PV6): it moves the sound
-  between speaker and headphones with the codec's mute bits over I2C1, which it already owns.
+  between speaker and headphones with the codec's mute bits over I2C1, which it already owns;
+  and the USB port power (see [USB](#usb-windows-11)).
 
 `ARCH=arm64 drivers/build.sh` builds the same sources for ARM64. The 14393 headers already
 support ARM64. Instead of WDK libraries, the import libraries are generated from the export tables
@@ -306,6 +313,45 @@ Tested on the console: sound from the speakers.
   runs: it shares I2C1 with the codec (see Drivers).
 - **Build**: `drivers/build_audio.sh`; **install**: `w64.cmd` from `agent\audio\`.
 
+## USB (Windows 11)
+
+The USB-C port is the Tegra XUSB host. The Windows driver is the inbox `USBXHCI`; this repository
+only brings the controller up and powers the port. Tested on the console (Switch OLED): the
+controller shows up without errors, and a wireless mouse receiver in a USB-C OTG adapter works,
+with the port powered by the console. For now this is a separate Hekate entry, **USB Test**
+(`wp11u/`), next to the regular Windows 11 entry.
+
+- **Firmware**: the controller runs NVIDIA's Falcon firmware for T210B01, which is not in
+  linux-firmware and is not included here. Take `lib/firmware/tegra210b01_xusb_firmware`
+  (122368 bytes) from the `initramfs` of a Switchroot Ubuntu image (the file has a 64-byte
+  U-Boot header, then gzip, then cpio) and copy it to the root of the FAT partition. Without it the
+  UEFI does nothing and Windows sees no USB controller.
+- **UEFI** (`*usb-win11only.patch`, `XusbPrepare` in `SdMmc.c`), ported from the winx Lite
+  bring-up (`t214/usb-host.h`), which follows Switchroot's `xhci-tegra.c` and
+  `xusb-tegra210.c`. On every Mariko board the port is usb2-0 (OTG) with SuperSpeed on PCIe PHY
+  lane 5; the Wi-Fi keeps lane 0. It runs at ReadyToBoot, when the FAT partition can be read:
+  - PLLU and the UTMI PLL. The UTMI PLL is first taken out of IDDQ: hekate leaves it there after
+    its USB mass storage mode;
+  - the XUSBA/XUSBC partitions, clocks and resets;
+  - the UTMI pad with the fuse calibration, and lane 5;
+  - the firmware is loaded into reserved memory below 4 GB and the Falcon is started;
+  - the host is left halted for Windows, and its interrupts go to the CPU.
+
+  On any failure the host goes back into reset and the stage and register values are drawn as
+  rows of squares. `XHC0` is visible only while the host is out of reset, so Windows never meets a
+  half-started controller.
+- **ACPI** `XHC0` (`PNP0D10`, `_CCA = 0`, host registers and SPI 39) and `XFW0` (`SWOA0D02`, the
+  Falcon mailbox for winx's `tegraxusb`; it is not installed yet and shows as an unknown device).
+- **Port power** (`swbatt`), as Switchroot's `bm92txx.c` and `bq2419x-charger.c`: when the BM92T
+  USB-C controller reports a device that wants power (an OTG adapter), the driver
+  - enables the 5.3 V source (PX3) and VCONN (PK5);
+  - puts the BQ24193 charger into VBUS mode at 1.3 A;
+  - keeps the BM92T's over-current protection on.
+
+  Everything is switched back when the device is removed, on a charger boost fault and when the
+  driver stops. It only runs when the BM92T and the charger report the expected chip IDs and the
+  XUSB host is running. A USB-C hub with its own charger needs no port power.
+
 ## Windows Update
 
 `w64.cmd` turns Windows Update off on every boot:
@@ -404,10 +450,16 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
   PC-relative, so lld emitted no `.reloc` section, and the kernel will not load a driver it cannot
   relocate. One absolute pointer in the image forces a relocation table.
 
+- **The BM92T read as all zeros**: it needs a repeated start between the register write and the
+  read; a stop in between resets its register pointer.
+- **USB 2.0 only (lane 5 left off) blue-screened at boot**: the controller still reports a
+  SuperSpeed port, so lane 5 must be set up too.
+
 ## Roadmap
 
 - ARM64: cheaper SD capability masking (drop the full SD page trap).
-- USB host (XUSB firmware load in UEFI + inbox XHCI).
+- USB: make it part of the regular Windows 11 entry; install winx's `tegraxusb` for the Falcon
+  mailbox; find what leaves the touch supply at 1.0 V.
 - Audio: microphone. Wi-Fi: throughput, sleep, no reboot after a driver update.
 - ARM32 on 4 cores through the same PSCI trapping (needs an AArch32 trap path).
 - Test `setupwatch.cmd` on a fresh Windows 11 install.
@@ -421,8 +473,10 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 - [steck0714/winx](https://github.com/steck0714/winx) and
   [ruje0504-2/Windows-for-Switch-Drivers](https://github.com/ruje0504-2/Windows-for-Switch-Drivers):
   a parallel Windows 11 effort. **Our Wi-Fi, Bluetooth and audio use their SwitchWifi,
-  SwitchBluetooth and SwitchAudio drivers** and follow their
-  port of the Switchroot PCIe bring-up.
+  SwitchBluetooth and SwitchAudio drivers**, and our PCIe and XUSB bring-up follows their
+  port of Switchroot's.
+- [hayato41200/Windows-for-Switch](https://github.com/hayato41200/Windows-for-Switch): USB on
+  Windows on the original Switch; the ACPI layout of the xHCI and the BM92T/charger port power.
 - [CTCaer/switch-l4t-kernel-4.9](https://github.com/CTCaer/switch-l4t-kernel-4.9) and Switchroot's
   device trees: the PCIe, UPHY and Wi-Fi power details and the BCM4356 firmware.
 
