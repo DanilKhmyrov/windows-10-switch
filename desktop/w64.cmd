@@ -26,6 +26,7 @@ rem Passwords never expire: once Wi-Fi syncs the clock (2022 -> today), the empt
 rem Player set during setup would count as years old and Windows would force a change.
 net accounts /maxpwage:unlimited >> %LOG% 2>&1
 powershell -NoProfile -Command "Get-LocalUser | Where-Object Enabled | Set-LocalUser -PasswordNeverExpires $true" >> %LOG% 2>&1
+call :removewin10 %1
 call :onedrive
 call :noupdate
 set WIFIREBOOT=
@@ -327,6 +328,16 @@ powershell -NoProfile -Command "(Get-PnpDevice -InstanceId 'ACPI\SWOA0F01\0').St
   pnputil /enum-devices /instanceid "ACPI\SWOA0F01\0" /drivers >> %LOG% 2>&1
 )
 reg query HKLM\SYSTEM\CurrentControlSet\Services\tegragpurender\Parameters >> %LOG% 2>&1
+goto :eof
+
+rem One-time removal of the Windows 10 partition right after C:, which then takes its space.
+rem Only on Windows 11 and only when agent\remove-win10.flag exists; the flag goes first.
+:removewin10
+if not exist %1:\agent\remove-win10.flag goto :eof
+ver | find "10.0.22" >nul || goto :eof
+del %1:\agent\remove-win10.flag
+echo -- remove windows 10 >> %LOG%
+powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\remove_win10.ps1 >> %LOG% 2>&1
 goto :eof
 
 rem Windows Update off, on every boot (Windows may turn parts of it back on). A feature update
