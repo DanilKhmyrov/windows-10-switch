@@ -64,6 +64,20 @@ try {
     Log ("  UserModeDriverName now:    " + (@($key.GetValue('UserModeDriverName')) -join ' | '))
 } finally { $key.Dispose() }
 
+Log '-- trace'
+# ETW session for tgd3d {5f0c4c6e-...} and the kernel driver {c27c1f9b-...}: a preallocated
+# circular file (its size is on disk from the start), flushed every second, so a hang keeps all
+# but the last second. Read it later with app\tgd3d-trace-export.exe FILE.etl.
+$etl = "$dst\trace-$(Get-Date -Format yyyyMMdd-HHmmss).etl"
+Get-EtwTraceSession -Name swgpu -ErrorAction SilentlyContinue | Remove-EtwTraceSession -ErrorAction SilentlyContinue
+try {
+    New-EtwTraceSession -Name swgpu -LogFileMode 0x22 -MaximumFileSize 32 -LocalFilePath $etl -BufferSize 64 `
+        -MinimumBuffers 4 -MaximumBuffers 16 -FlushTimer 1 -ClockType Performance | Out-Null
+    Add-EtwTraceProvider -Guid '{5f0c4c6e-7a0b-4b52-9d3a-2f6d1e8b4a11}' -SessionName swgpu -Level 5 -MatchAnyKeyword 0xFFFFFFFF | Out-Null
+    Add-EtwTraceProvider -Guid '{c27c1f9b-62e8-4e21-b29b-6bb2d585c6d0}' -SessionName swgpu -Level 5 -MatchAnyKeyword 0xFFFFFFFF | Out-Null
+    Log "  trace session swgpu -> $etl"
+} catch { Log "  trace not started: $($_.Exception.Message)" }
+
 Log '-- 3. one-time switch on the running desktop'
 $svc = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Services\tegragpurender', $true)
 try {
