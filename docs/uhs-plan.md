@@ -18,6 +18,8 @@ Results:
   PLLC4, which UEFI may not run) and sdbus' own tuning: the shim sets up the Tegra hardware
   tuning (hekate's sdmmc_tuning_execute for SDR50: 256 tries, step 1, 1x) when sdbus sets
   execute tuning.
+  Result (2026-11-13): works. Sequential 36.5 MB/s (was 20.7), 1611 random 4K/s (was 1302),
+  boot to the agent 131 s, no disk errors in the System log.
 The main entry runs the card in high speed (3.3 V, 48 MHz, ~21 MB/s) after the base-clock fix.
 
 ## Why the shim
