@@ -21,3 +21,13 @@ ARG LLVM_MINGW=llvm-mingw-20261020-ucrt-ubuntu-22.04-aarch64
 RUN curl -sSfL "https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/$LLVM_MINGW.tar.xz" \
         | tar -xJ -C /opt && mv "/opt/$LLVM_MINGW" /opt/llvm-mingw
 ENV PATH=$PATH:/opt/llvm-mingw/bin
+# bindgen must parse with a libclang as new as LLVM-MinGW's clang 23: libclang 18 ignores
+# gcc_struct on Windows ARM64 and lays out NAK's bitfield structs differently.
+RUN curl -sSfL https://apt.llvm.org/llvm-snapshot.gpg.key -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc \
+    && echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-23 main" > /etc/apt/sources.list.d/llvm23.list \
+    && apt-get update && apt-get install -y --no-install-recommends libclang1-23 libclang-common-23-dev \
+    && rm -rf /var/lib/apt/lists/*
+ENV LIBCLANG_PATH=/usr/lib/llvm-23/lib
+# bindgen 0.71 turned NIR's bitfield structs into placeholders for the MinGW target; 0.72.1 keeps
+# their fields (gcc_struct layout).
+RUN cargo install --locked --force bindgen-cli@0.72.1 && rm -rf /opt/cargo/registry /opt/cargo/git
