@@ -33,7 +33,7 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 | Build | 15035 (Enterprise Insider Preview) | 19041/19045 (22H2 Pro) | 22631 (23H2 Pro) |
 | Boot to desktop | yes, autologon as user `Player` | yes, autologon as user `Player` | yes, autologon as user `Player` |
 | CPU cores | 1 | 4 at ~1786 MHz (via PSCI trapping in the shim) | 4, same shim |
-| SD card | inbox `sdbus` | inbox `sdbus` through the shim's stage-2 trap | same, SD high speed at 48 MHz: ~21 MB/s sequential, ~1300 random 4 KB reads/s ([details](#sd-card-speed-windows-11)) |
+| SD card | inbox `sdbus` | inbox `sdbus` through the shim's stage-2 trap | same, **UHS-I SDR104** (1.8 V, 204 MHz): ~69 MB/s sequential, ~1700 random 4 KB reads/s ([details](#sd-card-speed-windows-11)) |
 | Touch screen | yes, multi-touch (`drivers/swhid`) | yes, same driver built for ARM64 | yes, same ARM64 binary |
 | Battery, charger, fan, overheat shutdown | yes (`drivers/swbatt`) | yes, same driver built for ARM64 | yes, same ARM64 binary |
 | CPU / RAM clocks | 1785 MHz at 1120 mV / ~1600 MHz | same UEFI code | same UEFI code |
@@ -74,7 +74,9 @@ Hekate's L4T loader starts `bl33.bin` at 0xAA000000 in EL2. The shim:
   - **stage-2 translation** maps everything 1:1 except the SDMMC page 0x700B0000. Windows
     accesses to it are emulated with the same width and logged, and bit 28 ("64-bit system bus")
     of the SDMMC1 capabilities register is cleared, so `sdbus` uses 32-bit ADMA2 like ARM32 does.
-    Bits 15:8 (base clock) are replaced with the real 48 MHz, see [SD card speed](#sd-card-speed-windows-11);
+    Bits 15:8 (base clock) are replaced with the real 48 MHz. The Windows 11 loader also adds
+    UHS-I SDR104: the shim does the Tegra side of the 1.8 V switch, the clock and the tuning when
+    `sdbus` writes host control 2, see [SD card speed](#sd-card-speed-windows-11);
   - **PSCI SYSTEM_OFF** (Windows shutdown): ATF does not remove power on the Switch, so the shim
     does what hekate's "Power off" does: over I2C5 it clears the soft-reset and alarm wake-ups in
     the MAX77620 `ONOFFCNFG2` and writes `ONOFFCNFG1 = SFT_RST`;
@@ -371,8 +373,36 @@ Measured on the console:
 | random 4 KB reads | 35/s | 1302/s |
 | boot until the agent starts | up to 10 min | about 2 min |
 
-This is close to the limit of 3.3 V high speed. The UHS-I modes (1.8 V, DDR50 and SDR104) would
-need the shim to switch the I/O voltage and the controller clock for `sdbus` (not done yet).
+### UHS-I SDR104 (v0.7.1)
+
+The Windows 11 loader is built with `shim/build.py ... --uhs sdr104`. The shim then reports SDR50
+and SDR104 in capabilities 1 and does the Tegra side of UHS, which `sdbus` does not know about,
+when `sdbus` writes host control 2 (it still does the SD protocol: CMD11, CMD6, CMD19 tuning):
+
+- **1.8 V** (`VDD_180` set): MAX77620 LDO2 (the SD I/O rail) to 1.8 V over I2C5, PMC
+  `PWR_DET` for the SDMMC1 pads, Schmitt triggers on the six SD pins, pad autocalibration with the
+  T210B01 offsets, SDHCI power control 1.8 V. Cleared again: back to 3.3 V.
+- **SDR104**: SDMMC1 clock 204 MHz from PLLP (hekate uses 199.68 MHz from PLLC4, which UEFI may
+  not run), tap 11; the Tegra hardware tuning is set up (128 tries) when `sdbus` starts tuning.
+  SDR50, if chosen, runs at 90.7 MHz as SDR104 (the T210 errata), 256 tries.
+- DDR50 is not offered: on the console it ended in `UNMOUNTABLE_BOOT_VOLUME`, and Linux does
+  not enable it on Tegra210 either.
+
+All of it sits after the old shim code, which keeps its addresses: when code inside the trap
+handler moves, the early UEFI hangs (squares 2 and 6). Every boot logs one retried read of LBA 0
+(`disk` event 153) at the moment of the switch; the retry succeeds.
+
+Measured on the console (one microSD card, 1 GB written and read back with matching SHA-256,
+then again after a reboot):
+
+| | high speed 48 MHz | SDR50 90.7 MHz | SDR104 204 MHz |
+|---|---|---|---|
+| sequential read | 20.7 MB/s | 36.5 MB/s | 68.9 MB/s |
+| random 4 KB reads | 1302/s | 1611/s | 1689/s |
+
+Random reads hardly change: there the card itself is the limit. Writes measured 10.4 MB/s with
+write-through. `docs/uhs-plan.md` has the register map and the test history. To go back, use
+the loader built without `--uhs` (high speed at 48 MHz).
 
 The agent also measures this once when `agent\perf.flag` exists (boot time, sequential and random
 reads of the recovery image) and writes `agent\perf.txt`.
@@ -492,6 +522,7 @@ Requirements: macOS or Linux with `clang`, Docker, Python 3. For images: your ow
 # 64-bit UEFI + shim (ARM64); repack with a longer start-up delay
 ARCH=AARCH64 ./uefi/build_bl33.sh uefi/out/bl33-64.bin
 python3 shim/build.py chain uefi/out/NintendoSwitch.fd --clean --delay-ms 10000 -o uefi/out/bl33-64.bin
+# Windows 11 loader as released: the same with --uhs sdr104 (SD card in UHS-I SDR104)
 
 # put a loader on the card (macOS, card exposed by Hekate's USB tools)
 sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
@@ -537,6 +568,10 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
   were not the bottleneck, the card was.
 - **The BM92T read as all zeros**: it needs a repeated start between the register write and the
   read; a stop in between resets its register pointer.
+- **Code inside the shim's trap handler must not move**: new code goes after it, reached by
+  single-instruction branches. Otherwise the early UEFI hangs, as with the shutdown fix and again
+  with the first UHS build.
+- **DDR50 does not work on Tegra210**; SDR104 does, with the hardware tuning set up.
 - **USB 2.0 only (lane 5 left off) blue-screened at boot**: the controller still reports a
   SuperSpeed port, so lane 5 must be set up too.
 
@@ -545,7 +580,7 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 - ARM64: cheaper SD capability masking (drop the full SD page trap).
 - USB: test more devices (flash drives, hubs, the dock); install winx's `tegraxusb` for the
   Falcon mailbox. Find what leaves the touch supply at 1.0 V.
-- SD: UHS-I (1.8 V) for Windows through the shim. Windows 10 ARM64 loader with the 48 MHz fix.
+- SD: avoid the retried read at the UHS switch. Windows 10 ARM64 loader with the 48 MHz fix.
 - Wi-Fi: find why it drops (it does so under Bluetooth load, e.g. two Joy-Cons).
 - GPU: Mesa NVK and a first rendered triangle on the OLED.
 - Audio: microphone. Wi-Fi: throughput, sleep, no reboot after a driver update.

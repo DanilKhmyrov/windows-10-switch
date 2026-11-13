@@ -1,7 +1,7 @@
 # SD UHS-I for Windows through the shim (plan)
 
-Status: experimental, behind `shim/build.py --uhs ddr50|sdr50-48`, tested in a separate Hekate
-entry (wp11u/, "SD UHS Test").
+Status: SDR104 released in v0.7.1 (Windows 11 loader, `shim/build.py --uhs sdr104`). The other
+variants (`ddr50`, `sdr50-48`, `sdr50`) stay for testing in a separate Hekate entry.
 
 Results:
 - `ddr50` (2026-11-13): Windows stops at UNMOUNTABLE_BOOT_VOLUME, status 0xC0000483 (device
