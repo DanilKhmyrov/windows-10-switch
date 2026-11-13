@@ -12,6 +12,11 @@
 #               nv_acr_ucode_prod.bin, pmu_bl.bin, gpmu_ucode_image.bin, gpmu_ucode_desc.bin,
 #               pmu_sig.bin, fecs_sig.bin) from NVIDIA's nvidia-l4t-firmware 32.7.6 package.
 #               Not redistributable; copied into the output package only.
+# NATIVE=N builds the gated native-submission variant (their --native-test-version N, here without
+# the display panel): the adapter reports NATIVE_SUBMIT, which the NVK Vulkan driver requires.
+# It starts natively only with a one-time permit (native_start_test.c): the volatile key
+# Services\tegragpurender\AllowDesktopStart and System32\drivers\TgGpuBootTestN.bin (4096
+# bytes, first DWORD 1), which the driver clears before touching the hardware.
 # The project's own host tests (tools/build.py) need newer tools than our container has for the
 # kernel part, so they are run separately; this script only compiles (Homebrew clang-cl) and
 # links (lld-link in the switch-wp-drivers container), as build_wifi.sh does.
@@ -53,7 +58,12 @@ for s in "${SOURCES[@]}"; do
     n="$(basename "$s" .c)"
     "$LLVM/clang-cl" "${FLAGS[@]}" "/Fo$OBJ/$n.obj" -- "$R/$s"
 done
-"$LLVM/clang-cl" "${FLAGS[@]}" /GS "/Fo$OBJ/render_miniport.obj" -- "$R/windows/render_miniport.c"
+NATIVE_FLAGS=()
+if [ -n "${NATIVE:-}" ]; then
+    NATIVE_FLAGS=("/DTG_GPU_NATIVE_TEST_VERSION=$NATIVE")
+    "$LLVM/clang-cl" "${FLAGS[@]}" "${NATIVE_FLAGS[@]}" "/Fo$OBJ/native_start_test.obj" -- "$R/windows/native_start_test.c"
+fi
+"$LLVM/clang-cl" "${FLAGS[@]}" "${NATIVE_FLAGS[@]}" /GS "/Fo$OBJ/render_miniport.obj" -- "$R/windows/render_miniport.c"
 "$LLVM/clang-cl" --target=aarch64-pc-windows-msvc /nologo /c /O2 /GS- /Zl /W4 /WX /std:c11 \
     -Wno-nonportable-include-path /D_ARM64_ "/imsvc$SI/um" "/imsvc$I/km/crt" "/imsvc$I/shared" \
     "/imsvc$SI/shared" "/imsvc$SI/ucrt" "/Fo$OBJ/no_d3d.obj" -- "$R/windows/no_d3d.c"
@@ -63,12 +73,13 @@ docker run --rm --network none -v "$WDK:/wdk:ro" -v "$OUT:/out" -v "$PROJECT/dri
 set -e
 km=/wdk/Lib/10.0.26100.0/km/ARM64
 cd /out/obj-gpu
-objs=$(ls *.obj | grep -v -e "^render_miniport.obj$" -e "^no_d3d.obj$")
+objs=$(ls *.obj | grep -v -e "^render_miniport.obj$" -e "^no_d3d.obj$" -e "^native_start_test.obj$")
+native=$(ls native_start_test.obj 2>/dev/null || true)
 llvm-lib-14 /nologo /machine:arm64 /out:TegraGpuCore.lib $objs
 lld-link-14 /nologo /driver /subsystem:native,10.0 /machine:arm64 /entry:GsDriverEntry \
     /include:_load_config_used /nodefaultlib /opt:ref /tsaware:no /section:.text,ERP \
     /section:.rdata,RP /section:.data,RWP /section:.pdata,RP /section:INIT,ERD /timestamp:0 \
-    /out:tegragpurender-unsigned.sys render_miniport.obj TegraGpuCore.lib \
+    /out:tegragpurender-unsigned.sys render_miniport.obj $native TegraGpuCore.lib \
     $km/displib.lib $km/ntoskrnl.lib $km/hal.lib $km/bufferoverflowfastfailk.lib $km/libcntpr.lib
 lld-link-14 /nologo /dll /noentry /machine:arm64 /nodefaultlib /opt:ref /timestamp:0 \
     /out:/out/tegragpurender/tegragpuno3d.dll /implib:tegragpuno3d.lib no_d3d.obj
@@ -77,7 +88,11 @@ osslsigncode sign -certs /cert/wifi-chain.crt -key /cert/wifi.key -h sha256 \
     -in tegragpurender-unsigned.sys -out /out/tegragpurender/tegragpurender.sys >/dev/null
 '
 # DriverVer back-dated as for Wi-Fi: Inf2Cat on the console refuses a date in its future.
-sed 's|^DriverVer=[0-9/]*,|DriverVer=05/02/2022,|' "$R/windows/tegragpurender.inf" > "$PKG/tegragpurender.inf"
+if [ -n "${NATIVE:-}" ]; then
+    sed "s|^DriverVer=.*|DriverVer=05/02/2022,0.1.0.$NATIVE|" "$R/windows/tegragpurender.inf" > "$PKG/tegragpurender.inf"
+else
+    sed 's|^DriverVer=[0-9/]*,|DriverVer=05/02/2022,|' "$R/windows/tegragpurender.inf" > "$PKG/tegragpurender.inf"
+fi
 for f in NETB_img.bin fecs.bin gpccs.bin nv_acr_ucode_prod.bin pmu_bl.bin gpmu_ucode_image.bin \
         gpmu_ucode_desc.bin pmu_sig.bin fecs_sig.bin; do
     cp "$FW/$f" "$PKG/"
