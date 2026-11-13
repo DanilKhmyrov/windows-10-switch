@@ -38,7 +38,7 @@ powershell -NoProfile -Command "Get-LocalUser | Where-Object Enabled | Set-Local
 call :crashdumps %1
 call :onedrive
 call :noupdate
-call :defender
+call :defender %1
 copy /y %~f0 C:\swagent\w64-applied.cmd >nul 2>&1
 :afteronce
 call :removewin10 %1
@@ -395,11 +395,15 @@ echo ==== perf done %time% >> %PF%
 type %PF% >> %LOG%
 goto :eof
 
-rem Microsoft Defender off (asked for by the user: on the SD card and this CPU its real-time scans
-rem and 220 MB signature downloads slow everything down). Policies, preferences and its scheduled
-rem tasks. Windows ignores these while Tamper Protection is on: that switch can only be turned off
-rem by hand in Windows Security. Leftover signature installers and kernel live dumps are deleted.
+rem Microsoft Defender off, only when agent\defender-off.flag exists (on the SD card and this CPU
+rem its real-time scans and 220 MB signature downloads slow everything down). Policies,
+rem preferences and its scheduled tasks. Windows ignores these while Tamper Protection is on: that
+rem switch can only be turned off by hand in Windows Security. Leftover signature installers and
+rem kernel live dumps are deleted either way.
 :defender
+del /q C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Temp\mpam-*.exe >nul 2>&1
+del /q C:\Windows\LiveKernelReports\*.dmp >nul 2>&1
+if not exist %1:\agent\defender-off.flag goto :eof
 echo -- defender off >> %LOG%
 set DEF=HKLM\SOFTWARE\Policies\Microsoft\Windows Defender
 reg add "%DEF%" /v DisableAntiSpyware /t REG_DWORD /d 1 /f >> %LOG% 2>&1

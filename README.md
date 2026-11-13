@@ -33,7 +33,7 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 | Build | 15035 (Enterprise Insider Preview) | 19041/19045 (22H2 Pro) | 22631 (23H2 Pro) |
 | Boot to desktop | yes, autologon as user `Player` | yes, autologon as user `Player` | yes, autologon as user `Player` |
 | CPU cores | 1 | 4 at ~1786 MHz (via PSCI trapping in the shim) | 4, same shim |
-| SD card | inbox `sdbus` | inbox `sdbus` through the shim's stage-2 trap | same |
+| SD card | inbox `sdbus` | inbox `sdbus` through the shim's stage-2 trap | same, SD high speed at 48 MHz: ~21 MB/s sequential, ~1300 random 4 KB reads/s ([details](#sd-card-speed-windows-11)) |
 | Touch screen | yes, multi-touch (`drivers/swhid`) | yes, same driver built for ARM64 | yes, same ARM64 binary |
 | Battery, charger, fan, overheat shutdown | yes (`drivers/swbatt`) | yes, same driver built for ARM64 | yes, same ARM64 binary |
 | CPU / RAM clocks | 1785 MHz at 1120 mV / ~1600 MHz | same UEFI code | same UEFI code |
@@ -46,7 +46,8 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 | Shut down from Windows | no | the console powers off (shim, PMIC) | the console powers off (shim, PMIC) |
 | Clock | no | no | the PMIC RTC: correct time at boot without network, once Windows has synced once |
 | USB (USB-C port) | no | no | **yes**: a wireless mouse receiver through an OTG adapter, port powered by the console ([details](#usb-windows-11)) |
-| GPU | no | no | no |
+| GPU (GM20B) | no | no | **experimental**: an external render driver starts and powers the GPU, nothing is drawn with it yet ([details](#gpu-experimental-windows-11)) |
+| Remote access | no | no | optional OpenSSH server, key login over Wi-Fi ([details](#ssh-windows-11)) |
 
 Windows 11 24H2 and later will not run: they need ARMv8.1 atomics, which the Cortex-A57 lacks.
 
@@ -72,7 +73,8 @@ Hekate's L4T loader starts `bl33.bin` at 0xAA000000 in EL2. The shim:
     `ACTLR_EL1` (trapped through `HCR_EL2.TACR`), because ATF disables HVC;
   - **stage-2 translation** maps everything 1:1 except the SDMMC page 0x700B0000. Windows
     accesses to it are emulated with the same width and logged, and bit 28 ("64-bit system bus")
-    of the SDMMC1 capabilities register is cleared, so `sdbus` uses 32-bit ADMA2 like ARM32 does;
+    of the SDMMC1 capabilities register is cleared, so `sdbus` uses 32-bit ADMA2 like ARM32 does.
+    Bits 15:8 (base clock) are replaced with the real 48 MHz, see [SD card speed](#sd-card-speed-windows-11);
   - **PSCI SYSTEM_OFF** (Windows shutdown): ATF does not remove power on the Switch, so the shim
     does what hekate's "Power off" does: over I2C5 it clears the soft-reset and alarm wake-ups in
     the MAX77620 `ONOFFCNFG2` and writes `ONOFFCNFG1 = SFT_RST`;
@@ -152,6 +154,7 @@ test-signed:
     never written. Once Windows has a real time (NTP), the offset to the RTC is kept in
     `Services\swhid\Parameters\RtcOffset`, and at every start the system time is set from it.
     Without this, Windows starts in 2022 (the UEFI clock) until it reaches the network;
+  - I2C5 (PMIC) is shared with `swbatt` through a named synchronization event;
   - the touch supply: PMIC LDO6 must be 2.9 V ("vdd-tp-2v9" in Switchroot). It was sometimes
     found at 1.0 V, where the panel answers on I2C but never senses anything. The driver sets
     2.9 V before it starts the panel, and power-cycles the panel (LDO6 and reset PJ7) when it does
@@ -159,7 +162,8 @@ test-signed:
 - `swbatt`: battery class miniport (MAX17050 fuel gauge, BQ24193 charger, TMP451 temperature),
   fan curve and overheat shutdown; on Windows 11 also the headphone jack (PV6): it moves the sound
   between speaker and headphones with the codec's mute bits over I2C1, which it already owns;
-  and the USB port power (see [USB](#usb-windows-11)).
+  the USB port power (see [USB](#usb-windows-11)); and the power bridge of the experimental GPU
+  driver (see [GPU](#gpu-experimental-windows-11)).
 
 `ARCH=arm64 drivers/build.sh` builds the same sources for ARM64. The 14393 headers already
 support ARM64. Instead of WDK libraries, the import libraries are generated from the export tables
@@ -351,6 +355,85 @@ with the port powered by the console. Keyboards, flash drives and hubs are not t
   driver stops. It only runs when the BM92T and the charger report the expected chip IDs and the
   XUSB host is running. A USB-C hub with its own charger needs no port power.
 
+## SD card speed (Windows 11)
+
+Windows read the SD card at about 3 MB/s (35 random 4 KB reads per second). The SDMMC1
+capabilities register reports a 208 MHz base clock, but UEFI clocks the controller at 48 MHz
+(PLLP / 8.5). `sdbus` divided the 208 MHz by 6 to stay under 50 MHz, so the card ran at 8 MHz.
+The shim already emulates the reads of that register and now reports the real 48 MHz. `sdbus`
+then uses no divider: SD high speed at 48 MHz, 3.3 V, 4-bit.
+
+Measured on the console:
+
+| | before | after |
+|---|---|---|
+| sequential read | 3.3 MB/s | 20.7 MB/s |
+| random 4 KB reads | 35/s | 1302/s |
+| boot until the agent starts | up to 10 min | about 2 min |
+
+This is close to the limit of 3.3 V high speed. The UHS-I modes (1.8 V, DDR50 and SDR104) would
+need the shim to switch the I/O voltage and the controller clock for `sdbus` (not done yet).
+
+The agent also measures this once when `agent\perf.flag` exists (boot time, sequential and random
+reads of the recovery image) and writes `agent\perf.txt`.
+
+## Agent options (Windows 11)
+
+Opt-in flag files in `agent\` on the CRASHDUMP partition:
+
+- `defender-off.flag`: turns Microsoft Defender off (policies, preferences, its scheduled tasks).
+  On this SD card its real-time scans and 220 MB signature downloads cost a lot. Windows only
+  honours it after **Tamper Protection** is switched off by hand in Windows Security. Without the
+  flag Defender stays as it is.
+- `remove-win10.flag`: one-time removal of a Windows 10 partition that directly follows C:, then
+  C: grows over the free space (`remove_win10.ps1`). Windows refuses to delete a partition that
+  holds its page file; then remove the partition table entry on another machine and keep the flag:
+  the agent only grows C: when the partition is gone.
+- `perf.flag`: one speed measurement, see above.
+
+Settings that only need to be applied once (power plan, OneDrive, Windows Update, Defender) are
+skipped while `w64.cmd` equals the copy saved after its last full run, so the agent no longer
+spends minutes on every boot. Crash minidumps of user-mode programs go to `agent\dumps`;
+`desktop/dumpinfo.py` prints the exception and the module from such a dump on any machine.
+
+## SSH (Windows 11)
+
+Optional. Put Microsoft's Win32-OpenSSH ARM64 build
+([PowerShell/Win32-OpenSSH](https://github.com/PowerShell/Win32-OpenSSH/releases), tested:
+v9.5.0.0p1, `OpenSSH-ARM64.zip`) and your public key as `authorized_keys` into `agent\ssh\`. The
+agent installs it (`ssh_setup.ps1`) with key login only, no passwords, and port 22 open to the
+local subnet only, and writes the address to `agent\ip.txt`.
+
+Notes from getting it to work:
+
+- OpenSSH 10.4 dropped every connection right after accepting it on this console.
+- The per-connection child of `sshd` runs unprivileged and must be able to read `sshd.exe`.
+  Files moved from a temporary folder keep that folder's ACL (Administrators and SYSTEM only).
+  `icacls "C:\Program Files\OpenSSH" /reset /T` restores Program Files' ACL.
+- On a Russian Windows the group is "Администраторы", so the default
+  `Match Group administrators` block is replaced by listing both key files.
+- To run a PowerShell script remotely, pipe it in: `ssh switch "powershell -Command -" < x.ps1`.
+
+## GPU (experimental, Windows 11)
+
+The Tegra X1's GPU (GM20B, `GM20B_B` on Mariko) has no Windows driver from NVIDIA. The
+[mesa-switch-woa](https://github.com/ruje0504-2/mesa-switch-woa) project (ruje0504-2) writes one:
+a WDDM/MCDM kernel driver (`tegra-x1-wddm/`) and Mesa NVK for Windows. Their desktop is not
+stable yet. Here it is only integrated, as a separate test loader (`GPUTEST=1` build, not in the
+releases):
+
+- **UEFI** (`*gpu-gputestonly.patch`): ACPI `GPU0` (`SWOA0F01`) with the render resources of their
+  `t214_resources.h` and the LIC window, which the driver requires.
+- **Power bridge** in `swbatt`: the driver reaches the PMIC through `\Device\SwitchBacklight`
+  (winx's SwitchFan on the Lite). Ours allows reads of the MAX77812 and writes only to its M1 (GPU)
+  rail: the voltage within 0.6–1.05 V and the M1 enable bit. Writes to M3 (DRAM) or M4 (CPU) are
+  refused. Kernel callers only.
+- **Build**: `drivers/build_gpu.sh` (their sources, our toolchain). The NVIDIA firmware comes from
+  NVIDIA's `nvidia-l4t-firmware` 32.7.6 package (`lib/firmware/tegra21x`) and is not included.
+
+Confirmed on the console (Switch OLED): the driver starts with Code 0 and powers the GPU up itself
+(M1 at 0.8 V through the bridge). Nothing is rendered with it yet; that needs Mesa NVK.
+
 ## Windows Update
 
 `w64.cmd` turns Windows Update off on every boot:
@@ -449,6 +532,9 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
   PC-relative, so lld emitted no `.reloc` section, and the kernel will not load a driver it cannot
   relocate. One absolute pointer in the image forces a relocation table.
 
+- **The SD card ran at 8 MHz** for days: the controller reports a 208 MHz base clock but runs at
+  48 MHz, and `sdbus` divides what it is told. Measure before optimizing: Defender and the agent
+  were not the bottleneck, the card was.
 - **The BM92T read as all zeros**: it needs a repeated start between the register write and the
   read; a stop in between resets its register pointer.
 - **USB 2.0 only (lane 5 left off) blue-screened at boot**: the controller still reports a
@@ -459,6 +545,9 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 - ARM64: cheaper SD capability masking (drop the full SD page trap).
 - USB: test more devices (flash drives, hubs, the dock); install winx's `tegraxusb` for the
   Falcon mailbox. Find what leaves the touch supply at 1.0 V.
+- SD: UHS-I (1.8 V) for Windows through the shim. Windows 10 ARM64 loader with the 48 MHz fix.
+- Wi-Fi: find why it drops (it does so under Bluetooth load, e.g. two Joy-Cons).
+- GPU: Mesa NVK and a first rendered triangle on the OLED.
 - Audio: microphone. Wi-Fi: throughput, sleep, no reboot after a driver update.
 - ARM32 on 4 cores through the same PSCI trapping (needs an AArch32 trap path).
 - Test `setupwatch.cmd` on a fresh Windows 11 install.
