@@ -16,7 +16,8 @@ T="$(cd "$1" && pwd)"; MESA="$(cd "$2" && pwd)"; mkdir -p "$3"; OUT="$(cd "$3" &
 N="${4:-201}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 docker run --rm -v "$T:$T" -v "$OUT:/out" -v "$HERE:/nvk:ro" -e T="$T" -e MESA="$MESA" -e N="$N" \
-    -e JOBS="${JOBS:-6}" switch-wp-nvk bash -c '
+    -e JOBS="${JOBS:-6}" -e SKIP_KMD="${SKIP_KMD:-0}" -e SKIP_ICD="${SKIP_ICD:-0}" \
+    -e SKIP_UMD="${SKIP_UMD:-0}" switch-wp-nvk bash -c '
 set -euo pipefail
 git config --global --add safe.directory "*"
 ln -sf "$(ls /opt/llvm-mingw/bin/clang-[0-9]* | head -1)" /usr/local/bin/clang-cl
@@ -40,13 +41,17 @@ if [ "${SKIP_KMD:-0}" != 1 ]; then
         --dlltool llvm-dlltool --display --native-test-version "$N" --gr-firmware "$FW" \
         --acr-firmware "$FW" >/out/kmd.log 2>&1 || { tail -30 /out/kmd.log; exit 1; }
 fi
+if [ "${SKIP_ICD:-0}" != 1 ]; then
 rm -rf /out/icd
 python3 "$MESA/src/nouveau/vulkan/nvkmd/windows/build_icd.py" --mesa "$MESA" --out /out/icd \
     --cross-file /nvk/windows-arm64.ini --cc aarch64-w64-mingw32-clang --clang-cl clang-cl \
     --sdk-include "$S" --wdk-include "$W" >/out/icd.log 2>&1 || { grep -E "error|FAILED" /out/icd.log | grep -v rustfmt | head -20; exit 1; }
 cp /opt/llvm-mingw/aarch64-w64-mingw32/bin/libunwind.dll /out/icd/
+fi
+if [ "${SKIP_UMD:-0}" != 1 ]; then
 rm -rf /out/umd
 python3 "$MESA/tegra-x1-wddm/tools/build_tgd3d.py" --out /out/umd --cross-file /nvk/windows-arm64.ini \
     --sdk-include "$S" --wdk-include "$W" --cpu-sync-control >/out/umd.log 2>&1 || { grep -E "error|FAILED" /out/umd.log | head -20; exit 1; }
+fi
 ls -la /out/kmd/kit/tegragpurender /out/icd/libvulkan_nouveau.dll /out/umd/TegraGpuD3DVk.dll
 '

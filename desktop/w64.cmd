@@ -35,6 +35,8 @@ rem Passwords never expire: once Wi-Fi syncs the clock (2022 -> today), the empt
 rem Player set during setup would count as years old and Windows would force a change.
 net accounts /maxpwage:unlimited >> %LOG% 2>&1
 powershell -NoProfile -Command "Get-LocalUser | Where-Object Enabled | Set-LocalUser -PasswordNeverExpires $true" >> %LOG% 2>&1
+rem The GPU desktop test first: the driver needs 16 MB of contiguous memory, easier to get early.
+call :gpudesk %1
 call :crashdumps %1
 call :onedrive
 call :noupdate
@@ -114,7 +116,6 @@ call :gpureport
 call :perf %1
 call :gpuprobe %1
 call :gpuvk %1
-call :gpudesk %1
 echo -- system >> %LOG%
 wmic cpu get NumberOfLogicalProcessors,CurrentClockSpeed >> %LOG% 2>&1
 wmic OS get FreePhysicalMemory,TotalVisibleMemorySize >> %LOG% 2>&1

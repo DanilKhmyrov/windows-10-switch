@@ -4,14 +4,14 @@
 # Called by w64.cmd when agent\gpudesk\run.flag exists; the flag is deleted first.
 # Results: agent\gpudesk\result.txt (written through, so a hang keeps what was reached).
 #   powershell -NoProfile -ExecutionPolicy Bypass -File gpudesk.ps1 AGENT_DIR
-# agent\gpudesk: driver\ (tegragpurender 0.1.0.201: tools/build.py --display
+# agent\gpudesk: driver\ (tegragpurender 0.1.0.202: tools/build.py --display
 # --native-test-version 201, signed), app\ (TegraGpuD3DVk.dll in CPU-sync mode,
 # libvulkan_nouveau.dll, nvk_windows_icd.json, libunwind.dll, nvk-windows-check.exe).
 # The steps follow the author's tgd3d-default package (logon-default mode):
 #  1. install the display driver; without a permit it stays gated (the basic display driver
 #     keeps the screen);
 #  2. register tgd3d in UserModeDriverName slots 1 and 2 and the ICD as VulkanDriverName;
-#  3. one-time permit (TgGpuBootTest201.bin = 1, volatile AllowDesktopStart) and a device
+#  3. one-time permit (TgGpuBootTest202.bin = 1, volatile AllowDesktopStart) and a device
 #     restart: the driver takes over the boot framebuffer it found and DWM switches to tgd3d;
 #  4. 30 s of passive observation. A reboot always returns to the gated state.
 param([string]$Agent)
@@ -29,7 +29,7 @@ function Prop($k) { (Get-PnpDeviceProperty -InstanceId $id -KeyName "DEVPKEY_Dev
 function State {
     $p = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\tegragpurender\Parameters' -ErrorAction SilentlyContinue
     $s = "  device version=$(Prop DriverVersion) problem=$(Prop ProblemCode) status=$((Get-PnpDevice -InstanceId $id).Status)"
-    foreach ($n in 'BootPermitStatus', 'StartGateStatus', 'ResourceStatus', 'HardwareStatus', 'PanelStatus') {
+    foreach ($n in 'BootPermitStatus', 'StartGateStatus', 'ResourceStatus', 'StartStep', 'StartStepStatus', 'HardwareStatus', 'PanelStatus') {
         if ($p -and $null -ne $p.$n) { $s += (" {0}=0x{1:X8}" -f $n, [uint32]$p.$n) }
     }
     $s
@@ -49,7 +49,7 @@ if (-not (Test-Path "$dst\driver\tegragpurender.cat")) { Log 'no catalog, stoppe
 pnputil /add-driver "$dst\driver\tegragpurender.inf" /install 2>&1 | ForEach-Object { Log "  $_" }
 Start-Sleep -Seconds 10
 Log (State)
-if ((Prop DriverVersion) -ne '0.1.0.201') { Log 'the display driver is not bound, stopped'; exit 1 }
+if ((Prop DriverVersion) -ne '0.1.0.202') { Log 'the display driver is not bound, stopped'; exit 1 }
 
 Log '-- 2. tgd3d and NVK registration'
 $subkey = 'SYSTEM\CurrentControlSet\Control\Class\' + (Prop Driver)
@@ -68,7 +68,7 @@ Log '-- 3. one-time switch on the running desktop'
 $svc = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Services\tegragpurender', $true)
 try {
     $data = [byte[]]::new(4096); $data[0] = 1
-    $permit = "$env:windir\System32\drivers\TgGpuBootTest201.bin"
+    $permit = "$env:windir\System32\drivers\TgGpuBootTest202.bin"
     $f = [IO.FileStream]::new($permit, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read, 4096, [IO.FileOptions]::WriteThrough)
     try { $f.Write($data, 0, $data.Length); $f.Flush($true) } finally { $f.Dispose() }
     $svc.CreateSubKey('AllowDesktopStart', [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [Microsoft.Win32.RegistryOptions]::Volatile).Close()
