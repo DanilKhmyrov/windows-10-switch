@@ -91,3 +91,14 @@ add the Tegra steps at the moment sdbus writes the matching standard register.
 
 Later: SDR104 (CAR 200 MHz, tuning through the standard execute-tuning bit with the Tegra
 tuning setup from hekate's sdmmc_tuning_execute).
+
+## Shim counters (swbatt log, 2026-11-13, SDR104 loader with the hand-off probe)
+
+- Trapped SD register accesses: about 5000 per second at idle, about 7000 per second over a
+  minute that includes the read test. Even at a few microseconds per trap that is around 1 % of
+  one core, so replacing the full-page trap is not worth its risk for speed.
+- `hostctl2` = 0x800B: SDR104, 1.8 V and Preset Value Enable (bit 15) set by sdbus.
+- One voltage switch per boot, no autocalibration timeout.
+- PMIC at the UEFI hand-off (warm reboot): LDO6 = 0xE8 (2.8 V; swhid then sets 2.9 V),
+  LDO2 = 0xF2 (3.3 V).
+- Read test: 71.4 MB/s sequential, 1532 random 4K/s.
