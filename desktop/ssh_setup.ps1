@@ -32,6 +32,9 @@ if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {
     if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
     Move-Item (Join-Path $tmp 'OpenSSH-ARM64') $dest
     Remove-Item $tmp -Recurse -Force
+    # Moved files keep the ACL of the temporary folder (Administrators and SYSTEM only), but the
+    # unprivileged per-connection sshd child must read and run sshd.exe: inherit Program Files'.
+    & icacls $dest /reset /T /Q | Out-Null
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest 'install-sshd.ps1')
     Set-Content -Path $mark -Value $zipHash -Encoding ascii
     $changed = $true
@@ -81,6 +84,7 @@ if (-not (Get-NetFirewallRule -Name 'sshd-local' -ErrorAction SilentlyContinue))
 }
 # Host keys readable by SYSTEM and Administrators only: sshd refuses keys others can read.
 & powershell -NoProfile -ExecutionPolicy Bypass -Command "Import-Module '$dest\OpenSSHUtils.psd1' -Force; & '$dest\FixHostFilePermissions.ps1' -Confirm:`$false" 2>&1 | Out-Null
+& icacls $dest /reset /T /Q | Out-Null
 Set-Service sshd -StartupType Automatic
 if ($changed) { Restart-Service sshd -Force; 'ssh: configured, sshd restarted' } else { Start-Service sshd }
 "ssh: sshd $((Get-Service sshd).Status), user $user"
