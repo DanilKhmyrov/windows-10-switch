@@ -74,12 +74,13 @@
 #define MMIO_LOG    (TRAP_BASE + 0x100)  // 64 entries of 8 bytes: access descriptor and value
 #define MMIO_SHOW   36
 #define MMIO_COUNT  (TRAP_BASE + 0xF20)
-#ifndef UHS_DDR50
-#define UHS_DDR50   0               // experimental SD UHS-I DDR50 (shim/build.py --uhs)
+#ifndef UHS_MODE
+#define UHS_MODE    0               // experimental SD UHS-I (shim/build.py --uhs): 1 = DDR50,
+                                    // 2 = SDR50 with the clock kept at 48 MHz
 #endif
 #define UHS_STATE   (TRAP_BASE + 0xF30)  // flags, last host control 2, saved vendor clock control,
                                          // voltage switches; flags: 1 = 1.8 V, 2 = DDR50 clock,
-                                         // 4 = autocal timed out
+                                         // 4 = autocal timed out, 8 = SDR50 run as SDR104
 #define SD_BASE     0x700B0000
 #define HCR_VM      (1 << 0)        // stage-2 translation for EL1
 #define S2_L1       0xAA0FC000      // stage-2 tables (reserved memory)
@@ -247,7 +248,7 @@ enter_aarch64_el1:
     str     wzr, [x3]
     mov32   x3, MMIO_COUNT
     str     wzr, [x3]
-#if UHS_DDR50
+#if UHS_MODE
     mov32   x3, UHS_STATE
     stp     xzr, xzr, [x3]
 #endif
@@ -533,7 +534,7 @@ mmio_trap:
     b.eq    1f
     ldr     x5, [sp, x3, lsl #3]
 1:  tbz     x0, #6, 5f
-#if UHS_DDR50
+#if UHS_MODE
     bl      uhs_write_hook          // may change x5 (the value); keeps x0-x4
 #endif
     cmp     x4, #0                  // write
@@ -573,7 +574,7 @@ mmio_trap:
     // DMA and buffers below 4 GB, like ARM32. With addresses above 4 GB the controller DMA hung the bus.
     mov32   x6, 0x700B0040
     cmp     x1, x6
-#if UHS_DDR50
+#if UHS_MODE
     b.ne    14f
 #else
     b.ne    13f
@@ -584,13 +585,39 @@ mmio_trap:
     // With the real 48 MHz it uses no divider: SD high speed at 48 MHz.
     and     x5, x5, #0xffffffffffff00ff
     orr     x5, x5, #0x3000
-#if UHS_DDR50
+#if UHS_MODE
     b       13f
-14: // capabilities 1 (0x44): add DDR50 (bit 2). SDR50/SDR104 stay hidden (UEFI clears them).
+14: // capabilities 1 (0x44): add one UHS mode. UEFI hides SDR50/SDR104.
     mov32   x6, 0x700B0044
     cmp     x1, x6
+    b.ne    15f
+#if UHS_MODE == 1
+    orr     x5, x5, #4              // DDR50
+#else
+    orr     x5, x5, #1              // SDR50
+    bic     x5, x5, #(1 << 13)      // without tuning (fixed tap at 48 MHz)
+#endif
+    b       13f
+15:
+#if UHS_MODE == 2
+    // host control 2 while SDR50 runs as SDR104 (T210 errata): show sdbus its own mode 2
+    mov32   x6, UHS_STATE
+    ldr     w7, [x6]
+    tbz     w7, #3, 13f
+    mov32   x6, 0x700B003E
+    cmp     x1, x6
+    b.ne    16f
+    cmp     x4, #1
     b.ne    13f
-    orr     x5, x5, #4
+    bic     x5, x5, #1
+    b       13f
+16: mov32   x6, 0x700B003C
+    cmp     x1, x6
+    b.ne    13f
+    cmp     x4, #2
+    b.ne    13f
+    bic     x5, x5, #(1 << 16)
+#endif
 #endif
 13: tbnz    x0, #15, 10f            // SF: 64-bit register
     mov     w5, w5
@@ -907,7 +934,7 @@ i2c5_xfer:
     b.ne    .Lpo6
 .Lpo7:  ret
 
-#if UHS_DDR50
+#if UHS_MODE
 // SD UHS-I DDR50 under Windows. sdbus does the SD side (CMD11, CMD6) and the standard SDHCI
 // registers; the Tegra side is done here, when sdbus writes the register that needs it, with
 // the steps of hekate's sdmmc_enable_low_voltage and sdmmc_setup_clock (T210B01 values):
@@ -942,12 +969,34 @@ uhs_write_hook:
 4:  mov32   x6, UHS_STATE
     ldr     w13, [x6]
     and     w14, w12, #7
+#if UHS_MODE == 1
     cmp     w14, #4                 // DDR50
     b.ne    5f
     tbnz    w13, #1, .Luhs_ret
     bl      uhs_ddr_on
     b       .Luhs_ret
-3:  tbz     w13, #0, 5f             // VDD_180 cleared
+#else
+    bic     w13, w13, #8
+    cmp     w14, #2                 // SDR50: the host runs it as SDR104 (T210 errata), tap 11
+    b.ne    17f
+    orr     w13, w13, #8
+    cmp     x4, #1
+    b.ne    18f
+    orr     x5, x5, #1              // 16-bit write: mode 2 -> 3
+    b       19f
+18: orr     x5, x5, #(1 << 16)      // 32-bit write at 0x3C
+19: str     w13, [x6]
+    bl      uhs_tap
+    b       .Luhs_ret
+17: str     w13, [x6]
+    b       .Luhs_ret
+#endif
+3:
+#if UHS_MODE == 2
+    bic     w13, w13, #8
+    str     w13, [x6]
+#endif
+    tbz     w13, #0, 5f             // VDD_180 cleared
     bl      uhs_to_3v3
 5:  mov32   x6, UHS_STATE
     ldr     w13, [x6]
@@ -1137,6 +1186,23 @@ uhs_to_3v3:
     bic     w9, w9, #1
     str     w9, [x10]
     ldp     x29, x30, [sp], #16
+    ret
+
+// Tap 11 (T210B01) for the UHS modes, card clock stopped around it.
+uhs_tap:
+    mov32   x8, SD_BASE
+    ldr     w14, [x8, #0x2C]
+    bic     w9, w14, #4
+    str     w9, [x8, #0x2C]
+    ldr     w9, [x8, #0x1C0]        // tuning control 0: TAP_HW_UPDATED off
+    bic     w9, w9, #(1 << 17)
+    str     w9, [x8, #0x1C0]
+    ldr     w9, [x8, #0x100]
+    bic     w9, w9, #0xFF0000
+    mov     w10, #(11 << 16)
+    orr     w9, w9, w10
+    str     w9, [x8, #0x100]
+    str     w14, [x8, #0x2C]
     ret
 
 uhs_ddr_on:

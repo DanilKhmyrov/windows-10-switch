@@ -1,6 +1,14 @@
 # SD UHS-I for Windows through the shim (plan)
 
-Status: step 1 (DDR50) implemented behind `shim/build.py --uhs`, being tested in a separate Hekate entry.
+Status: experimental, behind `shim/build.py --uhs ddr50|sdr50-48`, tested in a separate Hekate
+entry (wp11u/, "SD UHS Test").
+
+Results:
+- `ddr50` (2026-11-13): Windows stops at UNMOUNTABLE_BOOT_VOLUME, status 0xC0000483 (device
+  hardware error): sdbus took DDR50, then the card failed. Linux does not enable DDR50 on
+  Tegra210 at all (only SDR50/SDR104), so DDR50 is dropped.
+- `sdr50-48`: SDR50 (run as SDR104 per the T210 errata, tap 11, no tuning) with the clock left at
+  48 MHz. No speed gain; it only checks that the 1.8 V switch works. Next: 100 MHz, then SDR104.
 The main entry runs the card in high speed (3.3 V, 48 MHz, ~21 MB/s) after the base-clock fix.
 
 ## Why the shim
