@@ -368,10 +368,13 @@ echo -- perf >> %LOG%
 set PF=%1:\agent\perf.txt
 echo ==== perf %date% %time% >> %PF%
 powershell -NoProfile -Command "Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Diagnostics-Performance/Operational'; Id=100} -MaxEvents 5 -ErrorAction SilentlyContinue | ForEach-Object { $x=[xml]$_.ToXml(); $d=@{}; $x.Event.EventData.Data | ForEach-Object { $d[$_.Name]=$_.'#text' }; 'boot ' + $_.TimeCreated + ' total_ms=' + $d.BootTime + ' mainpath_ms=' + $d.MainPathBootTime + ' postboot_ms=' + $d.BootPostBootTime }" >> %PF% 2>&1
-winsat disk -seq -read -drive c >> %PF% 2>&1
-winsat disk -ran -read -drive c >> %PF% 2>&1
-winsat cpuformal >> %PF% 2>&1
-winsat mem >> %PF% 2>&1
+rem WinSAT prints to the console only; its results go to XML files with -xml.
+powershell -NoProfile -Command "$b=(Get-CimInstance Win32_OperatingSystem).LastBootUpTime; 'boot started ' + $b + ', agent at ' + (Get-Date) + ' = ' + [int]((Get-Date)-$b).TotalSeconds + ' s'" >> %PF% 2>&1
+winsat disk -seq -read -drive c -xml C:\swagent\ws-seq.xml >nul 2>&1
+winsat disk -ran -read -drive c -xml C:\swagent\ws-ran.xml >nul 2>&1
+winsat cpuformal -xml C:\swagent\ws-cpu.xml >nul 2>&1
+winsat mem -xml C:\swagent\ws-mem.xml >nul 2>&1
+copy /y C:\swagent\ws-*.xml %1:\agent\ >nul 2>&1
 echo ==== perf done %time% >> %PF%
 type %PF% >> %LOG%
 goto :eof
