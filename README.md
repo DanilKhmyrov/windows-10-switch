@@ -584,7 +584,7 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 
 - ARM64: cheaper SD capability masking (drop the full SD page trap).
 - USB: test more devices (flash drives, hubs, the dock); install winx's `tegraxusb` for the
-  Falcon mailbox. 
+  Falcon mailbox.
 - SD: avoid the retried read at the UHS switch. Windows 10 ARM64 loader with the 48 MHz fix.
 - Wi-Fi: find why it drops (it does so under Bluetooth load, e.g. two Joy-Cons).
 - GPU: Mesa NVK and a first rendered triangle on the OLED.
