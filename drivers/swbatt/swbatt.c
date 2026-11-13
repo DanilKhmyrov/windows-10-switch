@@ -957,6 +957,102 @@ static VOID UsbPowerOn(VOID)
 }
 
 // Once at start: only with the XUSB host running, a known BM92T and a known charger.
+// ---- Charger input current from the USB-C power contract ------------------------------------
+// The BQ24193 picks its input current limit itself when a source is plugged in: 500 mA for a
+// computer port (VBUS_STAT "USB host"). That is less than Windows draws, so the battery ran down on a
+// Mac's USB-C port. Horizon raises the limit after the BM92T has a power contract; here the
+// limit is raised to what the source itself offers in the current PD contract (CURRENT_PDO,
+// fixed supply), at most 2 A, never above it. Without a contract nothing is changed.
+
+#define PD_CURRENT_PDO  0x28
+#define CHG_INPUT       0x00
+#define CHG_IINLIM_MASK 0x07
+
+static ULONG g_pdo;                     // last CURRENT_PDO (0 = none)
+static ULONG g_chgInput = 0xFFFFFFFF;   // last REG00 read
+
+// BM92T register of up to 8 bytes (the first is its length), repeated start as in PdRead.
+static BOOLEAN PdReadBytes(UCHAR reg, UCHAR *buf, ULONG n)
+{
+    ULONG addr = ADDR_PD << 1, poll, words = (n + 3) / 4, got = 0;
+    BOOLEAN ok = FALSE;
+
+    g_i2c[R_CMD_ADDR0] = addr | ADDR0_READ;
+    g_i2c[R_CNFG] = DEBOUNCE_4T | NEW_MASTER_FSM | CMD1_READ;
+    g_i2c[R_FIFO_CONTROL] = FIFO_FLUSH;
+    LoadConfig();
+    g_i2c[R_CNFG] = (g_i2c[R_CNFG] & ~NORMAL_GO) | PACKET_GO;
+    g_i2c[R_TX_FIFO] = PROT_I2C;
+    g_i2c[R_TX_FIFO] = 0;
+    g_i2c[R_TX_FIFO] = HDR_REP_START | addr;
+    g_i2c[R_TX_FIFO] = reg;
+    g_i2c[R_TX_FIFO] = PROT_I2C;
+    g_i2c[R_TX_FIFO] = n - 1;
+    g_i2c[R_TX_FIFO] = HDR_READ | addr;
+    for (poll = 0; poll < POLL_LIMIT && got < words; poll++) {
+        if (g_i2c[R_STATUS] & STATUS_NOACK)
+            break;
+        if (g_i2c[R_FIFO_STATUS] & RX_FIFO_COUNT) {
+            ULONG w = g_i2c[R_RX_FIFO];
+            for (ULONG i = 0; i < 4 && got * 4 + i < n; i++)
+                buf[got * 4 + i] = (UCHAR) (w >> (8 * i));
+            got++;
+            continue;
+        }
+        KeStallExecutionProcessor(POLL_US);
+    }
+    ok = got == words && !(g_i2c[R_STATUS] & STATUS_NOACK);
+    KeStallExecutionProcessor(20);
+    g_i2c[R_CNFG] &= ~(PACKET_GO | NORMAL_GO);
+    return ok;
+}
+
+static VOID ChargePoll(VOID)
+{
+    static ULONG lastSet = 0xFFFFFFFF;
+    UCHAR b[5];
+    ULONG s1, input, pdo = 0, ma, mv, step;
+
+    if (g_vbus)                         // the console powers the port: no input
+        return;
+    if (!ChgRead(CHG_INPUT, &input))
+        return;
+    g_chgInput = input;
+    if (!g_usb)                         // BM92T not recognised at start: do not use it
+        return;
+    if (!PdRead(PD_STATUS1, &s1) || (s1 & (PD_S1_INSERT | PD_S1_SRC_MODE)) != PD_S1_INSERT) {
+        g_pdo = 0;
+        return;
+    }
+    if (PdReadBytes(PD_CURRENT_PDO, b, 5) && b[0] >= 4)
+        pdo = b[1] | ((ULONG) b[2] << 8) | ((ULONG) b[3] << 16) | ((ULONG) b[4] << 24);
+    g_pdo = pdo;
+    if (pdo == 0 || (pdo >> 30) != 0)  // no contract, or not a fixed supply
+        return;
+    ma = (pdo & 0x3FF) * 10;
+    mv = ((pdo >> 10) & 0x3FF) * 50;
+    if (mv < 4750 || mv > 15500)
+        return;
+    step = ma >= 2000 ? 6 : ma >= 1500 ? 5 : ma >= 1200 ? 4 : ma >= 900 ? 3 : 0;
+    if (step == 0 || (input & CHG_IINLIM_MASK) >= step)
+        return;
+    if (ChgWrite(CHG_INPUT, (input & ~CHG_IINLIM_MASK) | step)) {
+        g_chgInput = (input & ~CHG_IINLIM_MASK) | step;
+        if (lastSet != pdo) {
+            lastSet = pdo;
+            LogText("charge: contract ");
+            LogNum((LONG) mv);
+            LogText(" mV ");
+            LogNum((LONG) ma);
+            LogText(" mA, input limit ");
+            LogHex8(input);
+            LogText(" -> ");
+            LogHex8(g_chgInput);
+            LogText("\r\n");
+        }
+    }
+}
+
 static VOID UsbStart(VOID)
 {
     PHYSICAL_ADDRESS address;
@@ -1129,6 +1225,8 @@ VOID PollThread(PVOID context)
     do {
         JackPoll();
         UsbPoll();
+        if (pass % (POLL_MS / JACK_MS) == 0)
+            ChargePoll();
         if (pass++ % (POLL_MS / JACK_MS) != 0)
             continue;
         BOOLEAN ok = ReadSnapshot(&s, raw);
@@ -1178,6 +1276,11 @@ VOID PollThread(PVOID context)
                 LogText(" ");
                 LogNum((LONG) raw[i]);
             }
+            LogText("\r\n");
+            LogText("charge: input=");
+            LogHex8(g_chgInput);
+            LogText(" pdo=");
+            LogHex8(g_pdo);
             LogText("\r\n");
             LogShim();
             SaveLog();
