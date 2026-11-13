@@ -508,6 +508,14 @@ installs them and switches the running desktop once with the one-time permit:
 - the desktop worked on the GPU, in portrait (the driver does not rotate yet), until Task
   Manager was opened: then the whole console hung (no network, no dump, swbatt's log stopped
   within a minute). After a hard power-off the entry starts on the basic display driver again.
+- trials 3 and 4 showed the start depends on time after boot: four minutes after boot the
+  16 MB contiguous table segment fails (StartStep 2, `STATUS_NO_MEMORY`); the agent now switches
+  first thing (before its once-per-version block). Trial 4 switched at once (Code 0) and the
+  whole console hung within ten seconds. Its ETW trace (tgd3d provider, preallocated file
+  flushed every second, decoded with `tgd3d-trace-export.exe`): 685 events from `dwm.exe` and
+  Explorer over 3 s (display mode set, four rotated presents, shaders, resources, submits), no
+  tgd3d error event; it ends with DWM opening a 576x960 shared resource. The hang is below the
+  user-mode driver (kernel driver, GPU or dxgkrnl), as in the author's own Lite trials.
 
 ## Windows Update
 
