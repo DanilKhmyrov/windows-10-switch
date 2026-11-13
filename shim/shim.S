@@ -84,6 +84,8 @@
                                          // voltage switches; flags: 1 = 1.8 V, 2 = DDR50 clock,
                                          // 4 = autocal timed out, 8 = SDR50 run as SDR104
 #define SD_BASE     0x700B0000
+#define HANDOFF_PMIC (TRAP_BASE + 0xF40) // PMIC LDO6 and LDO2 config when UEFI hands over to
+                                         // Windows, each 0x100 | value (0 = not read)
 #define HCR_VM      (1 << 0)        // stage-2 translation for EL1
 #define S2_L1       0xAA0FC000      // stage-2 tables (reserved memory)
 #define S2_L2       0xAA0FD000      // 1..2 GB in 2 MB blocks
@@ -415,7 +417,13 @@ el1_sync:
     dsb     sy
     ldp     x6, x7, [sp], #16
 #endif
+#if UHS_MODE
+    b       handoff_probe           // same size as the movz it replaces (it does the movz)
+.Lsig_back:
+    movk    x0, #((SHIM_MAGIC >> 16) & 0xFFFF), lsl #16
+#else
     mov32   x0, SHIM_MAGIC          // UEFI reads ACTLR_EL1 into x0
+#endif
     mrs     x5, elr_el2
     add     x5, x5, #4
     msr     elr_el2, x5
@@ -1009,8 +1017,40 @@ a32_code:
 uhs_boot_init:
     mov32   x3, UHS_STATE
     stp     xzr, xzr, [x3]
+    stp     xzr, xzr, [x3, #16]     // and HANDOFF_PMIC
     dsb     sy
     ret
+
+// At the UEFI hand-off (ACTLR_EL1 signal): read the MAX77620 LDO6 (touch panel, 0x2F) and LDO2
+// (SD I/O, 0x27) configs for swbatt's log. Windows drivers have not started, I2C5 is free.
+// Keeps every register except x0 (set by the caller right after), x4 and x5 (saved by it).
+handoff_probe:
+    stp     x6, x7, [sp, #-48]!
+    stp     x8, x9, [sp, #16]
+    stp     x10, x30, [sp, #32]
+    mov32   x7, I2C5_BASE
+    mov32   x4, HANDOFF_PMIC
+    mov     w6, #0x2F
+    bl      1f
+    str     w6, [x4]
+    mov     w6, #0x27
+    bl      1f
+    str     w6, [x4, #4]
+    dsb     sy
+    ldp     x10, x30, [sp, #32]
+    ldp     x8, x9, [sp, #16]
+    ldp     x6, x7, [sp], #48
+    movz    x0, #(SHIM_MAGIC & 0xFFFF)
+    b       .Lsig_back
+1:  mov     x5, x30                 // w6 = register -> w6 = 0x100 | value
+    mov     w9, #0
+    bl      i2c5_xfer
+    mov     w9, #1
+    bl      i2c5_xfer
+    ldr     w6, [x7, #0x0C]
+    and     w6, w6, #0xFF
+    orr     w6, w6, #0x100
+    ret     x5
 
 // SD UHS-I DDR50 under Windows. sdbus does the SD side (CMD11, CMD6) and the standard SDHCI
 // registers; the Tegra side is done here, when sdbus writes the register that needs it, with

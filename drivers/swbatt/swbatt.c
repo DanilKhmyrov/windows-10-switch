@@ -377,6 +377,85 @@ static VOID LogHex8(ULONG value)
     LogText(text);
 }
 
+// ---- EL2 shim counters, read from its reserved page (shim/shim.S: TRAP_BASE) -----------------
+// MMIO_COUNT (0xF20): SD register accesses the shim has trapped; UHS_STATE (0xF30): flags
+// (1 = 1.8 V, 2 = fast clock, 4 = autocal timeout, 8 = SDR50 as SDR104), last host control 2,
+// saved vendor clock control, voltage switches; HANDOFF_PMIC (0xF40): PMIC LDO6 and LDO2 configs
+// when UEFI handed over to Windows (0x100 | value). The page is read only when it is not memory
+// Windows manages (MmGetPhysicalMemoryRanges), so mapping it uncached cannot clash with the OS.
+
+#define SHIM_PAGE 0xAA0FF000ULL
+
+static BOOLEAN g_shimChecked;
+static BOOLEAN g_shimOk;
+static ULONG g_shimLastCount;
+static ULONGLONG g_shimLastTime;
+
+static BOOLEAN ShimPageIsReserved(VOID)
+{
+    PPHYSICAL_MEMORY_RANGE ranges = MmGetPhysicalMemoryRanges();
+    BOOLEAN reserved = TRUE;
+
+    if (ranges == NULL)
+        return FALSE;
+    for (ULONG i = 0; ranges[i].BaseAddress.QuadPart != 0 || ranges[i].NumberOfBytes.QuadPart != 0; i++) {
+        ULONGLONG base = (ULONGLONG) ranges[i].BaseAddress.QuadPart;
+        if (SHIM_PAGE + 0x1000 > base && SHIM_PAGE < base + (ULONGLONG) ranges[i].NumberOfBytes.QuadPart)
+            reserved = FALSE;
+    }
+    ExFreePool(ranges);
+    return reserved;
+}
+
+static VOID LogShim(VOID)
+{
+    PHYSICAL_ADDRESS address;
+    volatile ULONG *page;
+    ULONG count, flags, hostctl2, switches, ldo6, ldo2;
+    ULONGLONG now;
+
+    if (!g_shimChecked) {
+        g_shimChecked = TRUE;
+        g_shimOk = ShimPageIsReserved();
+        if (!g_shimOk)
+            LogText("shim: page is Windows memory, counters not read\r\n");
+    }
+    if (!g_shimOk)
+        return;
+    address.QuadPart = (LONGLONG) SHIM_PAGE;
+    page = MmMapIoSpace(address, 0x1000, MmNonCached);
+    if (page == NULL)
+        return;
+    count = page[0xF20 / 4];
+    flags = page[0xF30 / 4];
+    hostctl2 = page[0xF34 / 4];
+    switches = page[0xF3C / 4];
+    ldo6 = page[0xF40 / 4];
+    ldo2 = page[0xF44 / 4];
+    MmUnmapIoSpace((PVOID) page, 0x1000);
+    now = KeQueryInterruptTime();
+
+    LogText("shim: sd_traps=");
+    LogHex8(count);
+    if (g_shimLastTime != 0 && now > g_shimLastTime) {
+        LogText(" per_s=");
+        LogNum((LONG) ((ULONGLONG) (count - g_shimLastCount) * 10000000ULL / (now - g_shimLastTime)));
+    }
+    g_shimLastCount = count;
+    g_shimLastTime = now;
+    LogText(" uhs=");
+    LogHex8(flags);
+    LogText(" hostctl2=");
+    LogHex8(hostctl2);
+    LogText(" v_switches=");
+    LogNum((LONG) switches);
+    LogText(" handoff_ldo6=");
+    LogHex8(ldo6);
+    LogText(" handoff_ldo2=");
+    LogHex8(ldo2);
+    LogText("\r\n");
+}
+
 static VOID LogClocks(VOID)
 {
     static const USHORT regs[] = { 0x020, 0x024, 0x0E0, 0x0E4, 0x0E8, 0x090, 0x094, 0x5E8, 0x19C, 0x370, 0x374 };
@@ -1100,6 +1179,7 @@ VOID PollThread(PVOID context)
                 LogNum((LONG) raw[i]);
             }
             LogText("\r\n");
+            LogShim();
             SaveLog();
         }
 
