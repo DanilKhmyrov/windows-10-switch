@@ -488,6 +488,9 @@ runs on the OLED's GM20B:
 - `vk-triangle`: `{"vulkan_draw":true,"pixels":1024,"red":300,"blue":724,"guard_bytes":128}`, a
   Vulkan render pass on the GPU with the pixels read back and checked.
 
+`desktop/vk-triangle.cmd` (with `vk-triangle-preview.ps1`) then shows the GPU-drawn triangle in a
+window on the console's desktop: a red triangle on blue, confirmed on the OLED screen.
+
 After a reboot the render driver starts in its safe paging-only mode again (the permit is gone).
 
 ## Windows Update
