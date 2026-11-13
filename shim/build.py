@@ -73,7 +73,7 @@ def build(mode: str, payload: bytes, output: Path, clean: bool = False, delay_ms
             f"-DCHAIN_A32={1 if mode == 'chain32' else 0}",
             f"-DCLEAN={1 if clean else 0}",
             f"-DDELAY_MS={delay_ms}",
-            f"-DUHS_MODE={ {'': 0, 'ddr50': 1, 'sdr50-48': 2}[uhs] }",
+            f"-DUHS_MODE={ {'': 0, 'ddr50': 1, 'sdr50-48': 2, 'sdr50': 3}[uhs] }",
         ]
         if mode == "test":
             a32 = assemble(HERE / "a32.S", "armv7a-none-eabi", tmp_path / "a32.o")
@@ -102,8 +102,8 @@ def main() -> None:
                         help="delay before starting UEFI (waits for memory training on Mariko)")
     parser.add_argument("--clean", action="store_true",
                         help="no colour marks: just a black screen (errors stay coloured)")
-    parser.add_argument("--uhs", choices=["ddr50", "sdr50-48"], default="",
-                        help="experimental SD UHS-I under Windows: DDR50, or SDR50 at 48 MHz (1.8 V test)")
+    parser.add_argument("--uhs", choices=["ddr50", "sdr50-48", "sdr50"], default="",
+                        help="experimental SD UHS-I under Windows: DDR50, SDR50 at 48 MHz (1.8 V test) or SDR50 at 90.7 MHz with tuning")
     args = parser.parse_args()
 
     payload = b""

@@ -76,7 +76,8 @@
 #define MMIO_COUNT  (TRAP_BASE + 0xF20)
 #ifndef UHS_MODE
 #define UHS_MODE    0               // experimental SD UHS-I (shim/build.py --uhs): 1 = DDR50,
-                                    // 2 = SDR50 with the clock kept at 48 MHz
+                                    // 2 = SDR50 with the clock kept at 48 MHz,
+                                    // 3 = SDR50 at 90.7 MHz with hardware tuning
 #endif
 #define UHS_STATE   (TRAP_BASE + 0xF30)  // flags, last host control 2, saved vendor clock control,
                                          // voltage switches; flags: 1 = 1.8 V, 2 = DDR50 clock,
@@ -1035,13 +1036,15 @@ uhs_read:
     b.ne    1f
 #if UHS_MODE == 1
     orr     x5, x5, #4              // DDR50
-#else
+#elif UHS_MODE == 2
     orr     x5, x5, #1              // SDR50
     bic     x5, x5, #(1 << 13)      // without tuning (fixed tap at 48 MHz)
+#else
+    orr     x5, x5, #1              // SDR50, with tuning (bit 13 stays)
 #endif
     b       .Lmmio_read_done
 1:
-#if UHS_MODE == 2
+#if UHS_MODE >= 2
     // host control 2 while SDR50 runs as SDR104 (T210 errata): show sdbus its own mode 2
     mov32   x6, UHS_STATE
     ldr     w7, [x6]
@@ -1103,13 +1106,26 @@ uhs_write_hook:
     b       19f
 18: orr     x5, x5, #(1 << 16)      // 32-bit write at 0x3C
 19: str     w13, [x6]
+#if UHS_MODE == 3
+    tbz     w12, #6, 20f            // execute tuning: set up the Tegra hardware tuning
+    bl      uhs_tuning
+    b       .Luhs_ret
+20: tbnz    w13, #1, .Luhs_ret      // fast clock already on (this is a later write)
     bl      uhs_tap
+    bl      uhs_clk_fast
+#else
+    bl      uhs_tap
+#endif
     b       .Luhs_ret
 17: str     w13, [x6]
+#if UHS_MODE == 3
+    tbz     w13, #1, .Luhs_ret
+    bl      uhs_clk_slow
+#endif
     b       .Luhs_ret
 #endif
 3:
-#if UHS_MODE == 2
+#if UHS_MODE >= 2
     bic     w13, w13, #8
     str     w13, [x6]
 #endif
@@ -1118,7 +1134,7 @@ uhs_write_hook:
 5:  mov32   x6, UHS_STATE
     ldr     w13, [x6]
     tbz     w13, #1, .Luhs_ret
-    bl      uhs_ddr_off
+    bl      uhs_clk_off
     b       .Luhs_ret
 .Luhs_clk:
     ldr     w13, [x6]
@@ -1134,9 +1150,13 @@ uhs_write_hook:
     tbz     w5, #24, 8f             // 32-bit write with reset all
     b       9f
 7:  tbz     w5, #0, .Luhs_ret
-9:  bl      uhs_ddr_off
+9:  bl      uhs_clk_off
     b       .Luhs_ret
-8:  cbz     x4, .Luhs_ret           // clock control: divider N (bits 15:8, 7:6) 0 -> 1
+8:
+#if UHS_MODE != 1
+    b       .Luhs_ret               // the SDHCI divider is sdbus' own
+#endif
+    cbz     x4, .Luhs_ret           // clock control: divider N (bits 15:8, 7:6) 0 -> 1
     tst     w5, #0xFFC0
     b.ne    .Luhs_ret
     orr     x5, x5, #0x100
@@ -1320,6 +1340,62 @@ uhs_tap:
     orr     w9, w9, w10
     str     w9, [x8, #0x100]
     str     w14, [x8, #0x2C]
+    ret
+
+// Back to 48 MHz for whichever fast clock is on.
+uhs_clk_off:
+#if UHS_MODE == 1
+    b       uhs_ddr_off
+#else
+    b       uhs_clk_slow
+#endif
+
+// SDR50: SDMMC1 from PLLP with divider 7: 408 * 2 / 9 = 90.7 MHz (hekate uses 99.84 MHz from
+// PLLC4, which UEFI may not have running). sdbus asks for 100 MHz from a 48 MHz base: no SDHCI
+// divider, so the card gets the 90.7 MHz.
+uhs_clk_fast:
+    mov     w12, #7
+    mov     w13, #2
+    b       1f
+uhs_clk_slow:
+    mov     w12, #15
+    mov     w13, #0
+1:  stp     x29, x30, [sp, #-16]!
+    mov32   x8, SD_BASE
+    ldr     w14, [x8, #0x2C]
+    bic     w9, w14, #4
+    str     w9, [x8, #0x2C]
+    mov32   x10, (CAR_BASE + 0x150)
+    ldr     w9, [x10]
+    and     w9, w9, #0x1FFFFF00
+    orr     w9, w9, w12
+    str     w9, [x10]
+    ldr     w9, [x10]
+    mov     w11, #10
+    bl      uhs_delay
+    str     w14, [x8, #0x2C]
+    mov32   x10, UHS_STATE
+    ldr     w9, [x10]
+    bic     w9, w9, #2
+    orr     w9, w9, w13
+    str     w9, [x10]
+    ldp     x29, x30, [sp], #16
+    ret
+
+// sdbus starts tuning (execute tuning in host control 2, then CMD19 until the bit clears): the
+// Tegra tuning setup of hekate's sdmmc_tuning_execute for SDR50: 256 tries, step 1, 1x multiplier.
+uhs_tuning:
+    mov32   x8, SD_BASE
+    str     wzr, [x8, #0x1C4]       // ventunctl1: step size 1
+    ldr     w9, [x8, #0x1C0]
+    mov32   w10, 0xFFFF1FFF
+    and     w9, w9, w10
+    orr     w9, w9, #(4 << 13)      // 256 tries
+    mov32   w10, 0xFFFFE03F
+    and     w9, w9, w10
+    orr     w9, w9, #(1 << 6)       // 1x multiplier
+    orr     w9, w9, #(1 << 17)      // TAP_HW_UPDATED
+    str     w9, [x8, #0x1C0]
     ret
 
 uhs_ddr_on:

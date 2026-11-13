@@ -12,6 +12,12 @@ Results:
   First build hung the early UEFI (squares 2 and 6): the new code sat inside the trap handler
   and moved it. Rebuilt the Test C way: the old shim keeps every address, four instructions
   change (adr payload, bl uhs_boot_init, b uhs_pre, b.ne uhs_read) and the new code follows it.
+  Rebuilt `sdr50-48` (2026-11-13): Windows boots, 20.4 MB/s, 1464 random 4K/s. Windows logs
+  nothing about the bus mode, so the speed of the next step is the proof of 1.8 V.
+- `sdr50`: SDR50 with SDMMC1 at 90.7 MHz from PLLP (divider 7; hekate takes 99.84 MHz from
+  PLLC4, which UEFI may not run) and sdbus' own tuning: the shim sets up the Tegra hardware
+  tuning (hekate's sdmmc_tuning_execute for SDR50: 256 tries, step 1, 1x) when sdbus sets
+  execute tuning.
 The main entry runs the card in high speed (3.3 V, 48 MHz, ~21 MB/s) after the base-clock fix.
 
 ## Why the shim
