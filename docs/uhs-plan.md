@@ -1,6 +1,6 @@
 # SD UHS-I for Windows through the shim (plan)
 
-Status: research done, not implemented. Windows 11 currently runs the SD card in high speed
+Status: step 1 (DDR50) implemented behind `shim/build.py --uhs`, being tested in a separate Hekate entry.
 (3.3 V, 48 MHz, ~21 MB/s) after the base-clock fix in the shim.
 
 ## Why the shim

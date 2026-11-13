@@ -74,6 +74,13 @@
 #define MMIO_LOG    (TRAP_BASE + 0x100)  // 64 entries of 8 bytes: access descriptor and value
 #define MMIO_SHOW   36
 #define MMIO_COUNT  (TRAP_BASE + 0xF20)
+#ifndef UHS_DDR50
+#define UHS_DDR50   0               // experimental SD UHS-I DDR50 (shim/build.py --uhs)
+#endif
+#define UHS_STATE   (TRAP_BASE + 0xF30)  // flags, last host control 2, saved vendor clock control,
+                                         // voltage switches; flags: 1 = 1.8 V, 2 = DDR50 clock,
+                                         // 4 = autocal timed out
+#define SD_BASE     0x700B0000
 #define HCR_VM      (1 << 0)        // stage-2 translation for EL1
 #define S2_L1       0xAA0FC000      // stage-2 tables (reserved memory)
 #define S2_L2       0xAA0FD000      // 1..2 GB in 2 MB blocks
@@ -240,6 +247,10 @@ enter_aarch64_el1:
     str     wzr, [x3]
     mov32   x3, MMIO_COUNT
     str     wzr, [x3]
+#if UHS_DDR50
+    mov32   x3, UHS_STATE
+    stp     xzr, xzr, [x3]
+#endif
     dsb     sy
     adr     x3, trap_start
     msr     vbar_el2, x3
@@ -522,6 +533,9 @@ mmio_trap:
     b.eq    1f
     ldr     x5, [sp, x3, lsl #3]
 1:  tbz     x0, #6, 5f
+#if UHS_DDR50
+    bl      uhs_write_hook          // may change x5 (the value); keeps x0-x4
+#endif
     cmp     x4, #0                  // write
     b.ne    2f
     strb    w5, [x1]
@@ -559,13 +573,25 @@ mmio_trap:
     // DMA and buffers below 4 GB, like ARM32. With addresses above 4 GB the controller DMA hung the bus.
     mov32   x6, 0x700B0040
     cmp     x1, x6
+#if UHS_DDR50
+    b.ne    14f
+#else
     b.ne    13f
+#endif
     and     x5, x5, #0xffffffffefffffff
     // Base clock (bits 15:8): the register says 208 MHz, but UEFI clocks SDMMC1 at 48 MHz
     // (PLLP / 8.5). sdbus divided the 208 by 6 for 50 MHz and the card ran at 8 MHz (3 MB/s).
     // With the real 48 MHz it uses no divider: SD high speed at 48 MHz.
     and     x5, x5, #0xffffffffffff00ff
     orr     x5, x5, #0x3000
+#if UHS_DDR50
+    b       13f
+14: // capabilities 1 (0x44): add DDR50 (bit 2). SDR50/SDR104 stay hidden (UEFI clears them).
+    mov32   x6, 0x700B0044
+    cmp     x1, x6
+    b.ne    13f
+    orr     x5, x5, #4
+#endif
 13: tbnz    x0, #15, 10f            // SF: 64-bit register
     mov     w5, w5
 10: cmp     x3, #31
@@ -880,6 +906,299 @@ i2c5_xfer:
     subs    w10, w10, #1
     b.ne    .Lpo6
 .Lpo7:  ret
+
+#if UHS_DDR50
+// SD UHS-I DDR50 under Windows. sdbus does the SD side (CMD11, CMD6) and the standard SDHCI
+// registers; the Tegra side is done here, when sdbus writes the register that needs it, with
+// the steps of hekate's sdmmc_enable_low_voltage and sdmmc_setup_clock (T210B01 values):
+// - host control 2 gets VDD_180: I/O rail LDO2 to 1.8 V, PMC pads to 1.8 V, Schmitt triggers,
+//   pad autocalibration, power control 1.8 V; cleared again: back to 3.3 V.
+// - host control 2 selects DDR50: SDMMC1 clock 81.6 MHz from PLLP, tap 11, and the SDHCI
+//   divider at least 2 (40.8 MHz on the card; sdbus thinks the base clock is 48 MHz).
+// - reset all while DDR50 is on: clock back to 48 MHz for the new identification.
+// In: x1 = address, x4 = width (1 = 16 bit, 2 = 32 bit), x5 = value. Keeps x0-x4, may change
+// x5. Clobbers x6-x17. Runs with interrupts masked, at most ~15 ms.
+uhs_write_hook:
+    stp     x29, x30, [sp, #-16]!
+    mov32   x6, SD_BASE
+    sub     x7, x1, x6
+    mov32   x6, UHS_STATE
+    cmp     x7, #0x3E
+    b.ne    1f
+    cmp     x4, #1
+    b.ne    .Luhs_ret
+    and     w12, w5, #0xFFFF
+    b       2f
+1:  cmp     x7, #0x3C
+    b.ne    .Luhs_clk
+    cmp     x4, #2
+    b.ne    .Luhs_ret
+    lsr     w12, w5, #16
+2:  str     w12, [x6, #4]           // w12 = new host control 2
+    ldr     w13, [x6]
+    tbz     w12, #3, 3f
+    tbnz    w13, #0, 4f
+    bl      uhs_to_1v8
+4:  mov32   x6, UHS_STATE
+    ldr     w13, [x6]
+    and     w14, w12, #7
+    cmp     w14, #4                 // DDR50
+    b.ne    5f
+    tbnz    w13, #1, .Luhs_ret
+    bl      uhs_ddr_on
+    b       .Luhs_ret
+3:  tbz     w13, #0, 5f             // VDD_180 cleared
+    bl      uhs_to_3v3
+5:  mov32   x6, UHS_STATE
+    ldr     w13, [x6]
+    tbz     w13, #1, .Luhs_ret
+    bl      uhs_ddr_off
+    b       .Luhs_ret
+.Luhs_clk:
+    ldr     w13, [x6]
+    tbz     w13, #1, .Luhs_ret      // only while DDR50 is on
+    cmp     x7, #0x2F               // software reset (byte)
+    b.ne    6f
+    cbz     x4, 7f
+    b       .Luhs_ret
+6:  cmp     x7, #0x2C
+    b.ne    .Luhs_ret
+    cmp     x4, #2
+    b.ne    8f
+    tbz     w5, #24, 8f             // 32-bit write with reset all
+    b       9f
+7:  tbz     w5, #0, .Luhs_ret
+9:  bl      uhs_ddr_off
+    b       .Luhs_ret
+8:  cbz     x4, .Luhs_ret           // clock control: divider N (bits 15:8, 7:6) 0 -> 1
+    tst     w5, #0xFFC0
+    b.ne    .Luhs_ret
+    orr     x5, x5, #0x100
+.Luhs_ret:
+    ldp     x29, x30, [sp], #16
+    ret
+
+// w11 = microseconds. Clobbers w15, w16, x17.
+uhs_delay:
+    mov32   x17, TMR_US
+    ldr     w15, [x17]
+1:  ldr     w16, [x17]
+    sub     w16, w16, w15
+    cmp     w16, w11
+    b.lo    1b
+    ret
+
+// MAX77620 LDO2 (SD I/O rail) voltage code w11 (0.8 V + 50 mV steps), power mode kept.
+uhs_ldo2:
+    stp     x29, x30, [sp, #-16]!
+    mov     w29, w11
+    mov32   x7, I2C5_BASE
+    mov     w10, #20000             // let a transfer from a Windows driver finish
+1:  ldr     w8, [x7, #0x1C]
+    tbz     w8, #8, 2f
+    subs    w10, w10, #1
+    b.ne    1b
+2:  mov     w6, #0x27
+    mov     w9, #0
+    bl      i2c5_xfer
+    mov     w9, #1
+    bl      i2c5_xfer
+    ldr     w6, [x7, #0x0C]
+    and     w6, w6, #0xC0
+    orr     w6, w6, w29
+    lsl     w6, w6, #8
+    add     w6, w6, #0x27           // the low byte is 0 after the shift
+    mov     w9, #2
+    bl      i2c5_xfer
+    ldp     x29, x30, [sp], #16
+    ret
+
+// Pad autocalibration (hekate _sdmmc_autocal_execute), card clock stopped by the caller.
+// x8 = SD_BASE. Clobbers w9-w11, w15-w17.
+uhs_autocal:
+    stp     x29, x30, [sp, #-16]!
+    ldr     w9, [x8, #0x1E0]
+    orr     w9, w9, #(1 << 31)      // E_INPUT_PWRD
+    str     w9, [x8, #0x1E0]
+    ldr     w9, [x8, #0x1E0]
+    mov     w11, #1
+    bl      uhs_delay
+    ldr     w9, [x8, #0x1E4]
+    orr     w9, w9, #(1 << 29)      // enable
+    orr     w9, w9, #(1 << 31)      // start
+    str     w9, [x8, #0x1E4]
+    ldr     w9, [x8, #0x1E4]
+    mov     w11, #2
+    bl      uhs_delay
+    mov32   x17, TMR_US
+    ldr     w15, [x17]
+    mov     w11, #10000
+1:  ldr     w9, [x8, #0x1EC]
+    tbz     w9, #31, 2f             // done
+    ldr     w16, [x17]
+    sub     w16, w16, w15
+    cmp     w16, w11
+    b.lo    1b
+    ldr     w9, [x8, #0x1E4]        // timeout: standard pad drive (50 ohm, up 8, down 8)
+    bic     w9, w9, #(1 << 29)
+    str     w9, [x8, #0x1E4]
+    mov32   x10, 0x70000A98
+    ldr     w9, [x10]
+    mov32   w11, 0xF8080FFF
+    and     w9, w9, w11
+    mov32   w11, (0x808 << 12)
+    orr     w9, w9, w11
+    str     w9, [x10]
+    ldr     w9, [x10]
+    mov32   x10, UHS_STATE
+    ldr     w9, [x10]
+    orr     w9, w9, #4
+    str     w9, [x10]
+2:  ldr     w9, [x8, #0x1E0]
+    bic     w9, w9, #(1 << 31)
+    str     w9, [x8, #0x1E0]
+    ldp     x29, x30, [sp], #16
+    ret
+
+uhs_to_1v8:
+    stp     x29, x30, [sp, #-16]!
+    mov     w11, #20                // 1.8 V
+    bl      uhs_ldo2
+    mov     w11, #150
+    bl      uhs_delay
+    mov32   x8, 0x7000E4E4          // PMC PWR_DET_VAL: SDMMC1 pads at 1.8 V
+    ldr     w9, [x8]
+    bic     w9, w9, #(1 << 12)
+    str     w9, [x8]
+    ldr     w9, [x8]
+    mov32   x8, 0x70003000          // pinmux SDMMC1 CLK, CMD, DAT3..0: Schmitt trigger
+    mov     x10, #0
+1:  ldr     w9, [x8, x10]
+    orr     w9, w9, #(1 << 12)
+    str     w9, [x8, x10]
+    add     x10, x10, #4
+    cmp     x10, #0x18
+    b.lo    1b
+    mov32   x8, SD_BASE
+    ldr     w14, [x8, #0x2C]        // card clock off for the calibration
+    bic     w9, w14, #4
+    str     w9, [x8, #0x2C]
+    ldr     w9, [x8, #0x1E4]        // autocal offsets for 1.8 V: pull-down 6, pull-up 6
+    mov32   w10, 0xFFFF8080
+    and     w9, w9, w10
+    mov     w10, #0x0606
+    orr     w9, w9, w10
+    str     w9, [x8, #0x1E4]
+    bl      uhs_autocal
+    mov     w9, #0x0B               // power control: 1.8 V, on
+    strb    w9, [x8, #0x29]
+    tbz     w14, #2, 2f
+    ldr     w9, [x8, #0x2C]
+    orr     w9, w9, #4
+    str     w9, [x8, #0x2C]
+2:  mov32   x10, UHS_STATE
+    ldr     w9, [x10]
+    orr     w9, w9, #1
+    str     w9, [x10]
+    ldr     w9, [x10, #12]
+    add     w9, w9, #1
+    str     w9, [x10, #12]
+    ldp     x29, x30, [sp], #16
+    ret
+
+uhs_to_3v3:
+    stp     x29, x30, [sp, #-16]!
+    mov     w11, #50                // 3.3 V
+    bl      uhs_ldo2
+    mov     w11, #150
+    bl      uhs_delay
+    mov32   x8, 0x7000E4E4
+    ldr     w9, [x8]
+    orr     w9, w9, #(1 << 12)
+    str     w9, [x8]
+    ldr     w9, [x8]
+    mov32   x8, SD_BASE
+    ldr     w14, [x8, #0x2C]
+    bic     w9, w14, #4
+    str     w9, [x8, #0x2C]
+    ldr     w9, [x8, #0x1E4]        // offsets for 3.3 V on T210B01: 0, 0
+    mov32   w10, 0xFFFF8080
+    and     w9, w9, w10
+    str     w9, [x8, #0x1E4]
+    bl      uhs_autocal
+    mov     w9, #0x0D               // power control as UEFI leaves it (3.0 V, on)
+    strb    w9, [x8, #0x29]
+    tbz     w14, #2, 1f
+    ldr     w9, [x8, #0x2C]
+    orr     w9, w9, #4
+    str     w9, [x8, #0x2C]
+1:  mov32   x10, UHS_STATE
+    ldr     w9, [x10]
+    bic     w9, w9, #1
+    str     w9, [x10]
+    ldp     x29, x30, [sp], #16
+    ret
+
+uhs_ddr_on:
+    stp     x29, x30, [sp, #-16]!
+    mov32   x8, SD_BASE
+    ldr     w14, [x8, #0x2C]
+    bic     w9, w14, #4
+    str     w9, [x8, #0x2C]
+    ldr     w9, [x8, #0x1C0]        // tuning control 0: TAP_HW_UPDATED off
+    bic     w9, w9, #(1 << 17)
+    str     w9, [x8, #0x1C0]
+    ldr     w9, [x8, #0x100]        // vendor clock control: tap 11, the old value saved
+    mov32   x10, UHS_STATE
+    str     w9, [x10, #8]
+    bic     w9, w9, #0xFF0000
+    mov     w10, #(11 << 16)
+    orr     w9, w9, w10
+    str     w9, [x8, #0x100]
+    mov32   x10, (CAR_BASE + 0x150) // PLLP, divider 8: 408 * 2 / 10 = 81.6 MHz
+    ldr     w9, [x10]
+    and     w9, w9, #0x1FFFFF00
+    orr     w9, w9, #8
+    str     w9, [x10]
+    ldr     w9, [x10]
+    mov     w11, #10
+    bl      uhs_delay
+    tst     w14, #0xFFC0            // SDHCI divider at least 2
+    b.ne    1f
+    orr     w14, w14, #0x100
+1:  str     w14, [x8, #0x2C]
+    mov32   x10, UHS_STATE
+    ldr     w9, [x10]
+    orr     w9, w9, #2
+    str     w9, [x10]
+    ldp     x29, x30, [sp], #16
+    ret
+
+uhs_ddr_off:
+    stp     x29, x30, [sp, #-16]!
+    mov32   x8, SD_BASE
+    ldr     w14, [x8, #0x2C]
+    bic     w9, w14, #4
+    str     w9, [x8, #0x2C]
+    mov32   x10, UHS_STATE
+    ldr     w9, [x10, #8]           // vendor clock control as before
+    str     w9, [x8, #0x100]
+    mov32   x10, (CAR_BASE + 0x150) // back to 48 MHz (divider 15)
+    ldr     w9, [x10]
+    and     w9, w9, #0x1FFFFF00
+    orr     w9, w9, #15
+    str     w9, [x10]
+    ldr     w9, [x10]
+    mov     w11, #10
+    bl      uhs_delay
+    str     w14, [x8, #0x2C]
+    mov32   x10, UHS_STATE
+    ldr     w9, [x10]
+    bic     w9, w9, #2
+    str     w9, [x10]
+    ldp     x29, x30, [sp], #16
+    ret
+#endif
 
     .balign 8
 trap_end:
