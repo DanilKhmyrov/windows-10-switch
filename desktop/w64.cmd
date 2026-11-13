@@ -12,6 +12,15 @@ reg query HKLM\SYSTEM\Setup /v SystemSetupInProgress 2>nul | find "0x1" >nul && 
   echo -- setup in progress, nothing else to do >> %LOG%
   goto :eof
 )
+rem Settings that only need to be applied once per agent version: skipped while this w64.cmd
+rem equals the copy saved after the last full run. The agent used to spend minutes on every boot
+rem here (PowerShell is slow on this CPU and SD card) while the user was already working.
+set ONCE=1
+if exist C:\swagent\w64-applied.cmd fc /b %~f0 C:\swagent\w64-applied.cmd >nul 2>&1 && set ONCE=
+if not defined ONCE (
+  echo -- settings unchanged since the last full run, skipped >> %LOG%
+  goto :afteronce
+)
 echo -- power >> %LOG%
 powercfg /change monitor-timeout-ac 0 >> %LOG% 2>&1
 powercfg /change monitor-timeout-dc 0 >> %LOG% 2>&1
@@ -26,10 +35,14 @@ rem Passwords never expire: once Wi-Fi syncs the clock (2022 -> today), the empt
 rem Player set during setup would count as years old and Windows would force a change.
 net accounts /maxpwage:unlimited >> %LOG% 2>&1
 powershell -NoProfile -Command "Get-LocalUser | Where-Object Enabled | Set-LocalUser -PasswordNeverExpires $true" >> %LOG% 2>&1
-call :removewin10 %1
 call :crashdumps %1
 call :onedrive
 call :noupdate
+call :defender
+copy /y %~f0 C:\swagent\w64-applied.cmd >nul 2>&1
+:afteronce
+call :removewin10 %1
+call :dumpcopy %1
 set WIFIREBOOT=
 call :wifi %1
 call :bt %1
@@ -320,6 +333,8 @@ rem The GPU driver needs swbatt's power bridge, which may start after it at boot
 rem device once from here, then log its state and the driver's own status values.
 :gpureport
 reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\SWOA0F01" >nul 2>&1 || goto :eof
+rem Only with the GPU test loader: the device is not present under the regular one.
+powershell -NoProfile -Command "if (Get-PnpDevice -PresentOnly -InstanceId 'ACPI\SWOA0F01\0' -ErrorAction SilentlyContinue) { 'present' }" | find "present" >nul || goto :eof
 echo -- gpu state >> %LOG%
 pnputil /enum-devices /instanceid "ACPI\SWOA0F01\0" /drivers >> %LOG% 2>&1
 rem Get-PnpDevice reports OK/Error/Unknown in English on every display language.
@@ -349,6 +364,9 @@ set LD=HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps
 reg add "%LD%" /v DumpFolder /t REG_EXPAND_SZ /d C:\swagent\dumps /f >nul 2>&1
 reg add "%LD%" /v DumpType /t REG_DWORD /d 1 /f >nul 2>&1
 reg add "%LD%" /v DumpCount /t REG_DWORD /d 10 /f >nul 2>&1
+goto :eof
+
+:dumpcopy
 if not exist C:\swagent\dumps goto :eof
 if not exist %1:\agent\dumps mkdir %1:\agent\dumps
 echo -- crash dumps >> %LOG%
@@ -368,15 +386,35 @@ echo -- perf >> %LOG%
 set PF=%1:\agent\perf.txt
 echo ==== perf %date% %time% >> %PF%
 powershell -NoProfile -Command "Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Diagnostics-Performance/Operational'; Id=100} -MaxEvents 5 -ErrorAction SilentlyContinue | ForEach-Object { $x=[xml]$_.ToXml(); $d=@{}; $x.Event.EventData.Data | ForEach-Object { $d[$_.Name]=$_.'#text' }; 'boot ' + $_.TimeCreated + ' total_ms=' + $d.BootTime + ' mainpath_ms=' + $d.MainPathBootTime + ' postboot_ms=' + $d.BootPostBootTime }" >> %PF% 2>&1
-rem WinSAT prints to the console only; its results go to XML files with -xml.
 powershell -NoProfile -Command "$b=(Get-CimInstance Win32_OperatingSystem).LastBootUpTime; 'boot started ' + $b + ', agent at ' + (Get-Date) + ' = ' + [int]((Get-Date)-$b).TotalSeconds + ' s'" >> %PF% 2>&1
-winsat disk -seq -read -drive c -xml C:\swagent\ws-seq.xml >nul 2>&1
-winsat disk -ran -read -drive c -xml C:\swagent\ws-ran.xml >nul 2>&1
-winsat cpuformal -xml C:\swagent\ws-cpu.xml >nul 2>&1
-winsat mem -xml C:\swagent\ws-mem.xml >nul 2>&1
-copy /y C:\swagent\ws-*.xml %1:\agent\ >nul 2>&1
+rem SD read speed on the recovery image, which nothing reads during a normal boot (not cached):
+rem 128 MB sequentially in 1 MB blocks, then 2000 random 4 KB reads further into the file.
+powershell -NoProfile -Command "$f='C:\Windows\System32\Recovery\winre.wim'; $s=[IO.File]::Open($f,'Open','Read','ReadWrite'); $buf=New-Object byte[] 1MB; $t=[Diagnostics.Stopwatch]::StartNew(); for($i=0;$i -lt 128;$i++){ [void]$s.Read($buf,0,1MB) }; $t.Stop(); 'sequential read: ' + [math]::Round(128/$t.Elapsed.TotalSeconds,1) + ' MB/s'; $r=New-Object Random 7; $b4=New-Object byte[] 4096; $t=[Diagnostics.Stopwatch]::StartNew(); for($i=0;$i -lt 2000;$i++){ $s.Position=(200MB + [long]($r.Next(0,100000))*4096); [void]$s.Read($b4,0,4096) }; $t.Stop(); 'random 4 KB reads: ' + [math]::Round(2000/$t.Elapsed.TotalSeconds) + ' per second (' + [math]::Round(8/$t.Elapsed.TotalSeconds,2) + ' MB/s)'; $s.Close()" >> %PF% 2>&1
 echo ==== perf done %time% >> %PF%
 type %PF% >> %LOG%
+goto :eof
+
+rem Microsoft Defender off (asked for by the user: on the SD card and this CPU its real-time scans
+rem and 220 MB signature downloads slow everything down). Policies, preferences and its scheduled
+rem tasks. Windows ignores these while Tamper Protection is on: that switch can only be turned off
+rem by hand in Windows Security. Leftover signature installers and kernel live dumps are deleted.
+:defender
+echo -- defender off >> %LOG%
+set DEF=HKLM\SOFTWARE\Policies\Microsoft\Windows Defender
+reg add "%DEF%" /v DisableAntiSpyware /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+reg add "%DEF%\Real-Time Protection" /v DisableRealtimeMonitoring /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+reg add "%DEF%\Real-Time Protection" /v DisableBehaviorMonitoring /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+reg add "%DEF%\Real-Time Protection" /v DisableOnAccessProtection /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+reg add "%DEF%\Real-Time Protection" /v DisableScanOnRealtimeEnable /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+reg add "%DEF%\Real-Time Protection" /v DisableIOAVProtection /t REG_DWORD /d 1 /f >> %LOG% 2>&1
+reg add "%DEF%\Spynet" /v SpynetReporting /t REG_DWORD /d 0 /f >> %LOG% 2>&1
+reg add "%DEF%\Spynet" /v SubmitSamplesConsent /t REG_DWORD /d 2 /f >> %LOG% 2>&1
+reg add "%DEF%\Signature Updates" /v UpdateOnStartUp /t REG_DWORD /d 0 /f >> %LOG% 2>&1
+reg add "%DEF%\Signature Updates" /v ScheduleDay /t REG_DWORD /d 8 /f >> %LOG% 2>&1
+reg add "%DEF%\Scan" /v ScheduleDay /t REG_DWORD /d 8 /f >> %LOG% 2>&1
+powershell -NoProfile -Command "Set-MpPreference -DisableRealtimeMonitoring $true -DisableBehaviorMonitoring $true -DisableIOAVProtection $true -MAPSReporting 0 -SubmitSamplesConsent 2 -SignatureScheduleDay 8 -ScanScheduleDay 8 -ErrorAction SilentlyContinue; Get-ScheduledTask -TaskPath '\Microsoft\Windows\Windows Defender\' -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null; $s=Get-MpComputerStatus -ErrorAction SilentlyContinue; 'defender: tamper protection ' + $s.IsTamperProtected + ', real-time ' + $s.RealTimeProtectionEnabled" >> %LOG% 2>&1
+del /q C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Temp\mpam-*.exe >nul 2>&1
+del /q C:\Windows\LiveKernelReports\*.dmp >nul 2>&1
 goto :eof
 
 rem Windows Update off, on every boot (Windows may turn parts of it back on). A feature update
