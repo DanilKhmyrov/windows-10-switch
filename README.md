@@ -516,6 +516,13 @@ installs them and switches the running desktop once with the one-time permit:
   Explorer over 3 s (display mode set, four rotated presents, shaders, resources, submits), no
   tgd3d error event; it ends with DWM opening a 576x960 shared resource. The hang is below the
   user-mode driver (kernel driver, GPU or dxgkrnl), as in the author's own Lite trials.
+- trial 5 (switch about a minute after boot): stable. Explorer, Notepad, Start, Task Manager,
+  Firefox and a video all worked for 10+ minutes, with no display driver events in the System
+  log. The hang is intermittent. Measured from the tgd3d trace over 146 s: DWM presents at 12
+  frames/s on average (up to 26 in a 10 s window, median frame interval 35 ms), and each present
+  takes 17 ms median in the user-mode driver (CPU-sync mode plus the rotation copy). Submissions
+  take 0.2 ms. Firefox did not use the GPU (no tgd3d events from it). Users see it as "not
+  very smooth"; video stuttered at first and then played.
 
 ## Windows Update
 
