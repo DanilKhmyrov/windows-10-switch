@@ -99,6 +99,7 @@ tuning setup from hekate's sdmmc_tuning_execute).
   one core, so replacing the full-page trap is not worth its risk for speed.
 - `hostctl2` = 0x800B: SDR104, 1.8 V and Preset Value Enable (bit 15) set by sdbus.
 - One voltage switch per boot, no autocalibration timeout.
-- PMIC at the UEFI hand-off (warm reboot): LDO6 = 0xE8 (2.8 V; swhid then sets 2.9 V),
-  LDO2 = 0xF2 (3.3 V).
+- PMIC at the UEFI hand-off: LDO6 = 0xE8 (2.8 V) after a reboot, 0xC4 (1.0 V) after a cold
+  start; LDO2 = 0xF2 (3.3 V). The touch panel needs 2.9 V; the shim now sets it at the hand-off
+  (swhid also checks it).
 - Read test: 71.4 MB/s sequential, 1532 random 4K/s.

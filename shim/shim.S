@@ -1022,7 +1022,7 @@ uhs_boot_init:
     ret
 
 // At the UEFI hand-off (ACTLR_EL1 signal): read the MAX77620 LDO6 (touch panel, 0x2F) and LDO2
-// (SD I/O, 0x27) configs for swbatt's log. Windows drivers have not started, I2C5 is free.
+// (SD I/O, 0x27) configs for swbatt's log (values before any change), and put LDO6 at 2.9 V. Windows drivers have not started, I2C5 is free.
 // Keeps every register except x0 (set by the caller right after), x4 and x5 (saved by it).
 handoff_probe:
     stp     x6, x7, [sp, #-48]!
@@ -1033,6 +1033,20 @@ handoff_probe:
     mov     w6, #0x2F
     bl      1f
     str     w6, [x4]
+    // The touch panel rail must be 2.9 V (Switchroot "vdd-tp-2v9", hekate touch_power_on). After a
+    // cold start UEFI leaves it at 1.0 V (0xC4), after a reboot at 2.8 V. If LDO6 is on (power
+    // mode bits 7:6 = 3) at another voltage, set 2.9 V and keep the mode; swhid checks it again.
+    and     w8, w6, #0xC0
+    cmp     w8, #0xC0
+    b.ne    2f
+    and     w8, w6, #0x3F
+    cmp     w8, #0x2A
+    b.eq    2f
+    mov     w6, #((0xC0 | 0x2A) << 8)
+    add     w6, w6, #0x2F
+    mov     w9, #2
+    bl      i2c5_xfer
+2:
     mov     w6, #0x27
     bl      1f
     str     w6, [x4, #4]
