@@ -114,6 +114,7 @@ call :gpureport
 call :perf %1
 call :gpuprobe %1
 call :gpuvk %1
+call :gpudesk %1
 echo -- system >> %LOG%
 wmic cpu get NumberOfLogicalProcessors,CurrentClockSpeed >> %LOG% 2>&1
 wmic OS get FreePhysicalMemory,TotalVisibleMemorySize >> %LOG% 2>&1
@@ -377,6 +378,14 @@ for %%F in (C:\swagent\dumps\*.dmp) do if not exist "%1:\agent\dumps\%%~nxF" (
   echo %%~nxF >> %LOG%
   copy /y "%%F" %1:\agent\dumps\ >nul 2>&1
 )
+goto :eof
+
+rem One-time GPU desktop test (GPU Desktop loader only) when agent\gpudesk\run.flag exists:
+rem gpudesk.ps1 installs the WDDM display driver and tgd3d and switches the running desktop once.
+:gpudesk
+if not exist %1:\agent\gpudesk\run.flag goto :eof
+echo -- gpudesk >> %LOG%
+powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\gpudesk.ps1 %1:\agent >> %LOG% 2>&1
 goto :eof
 
 rem One-time Vulkan triangle test with NVK (GPU Test loader only) when agent\gpuvk\run.flag exists:
