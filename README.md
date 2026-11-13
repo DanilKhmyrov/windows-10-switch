@@ -462,7 +462,21 @@ releases):
   NVIDIA's `nvidia-l4t-firmware` 32.7.6 package (`lib/firmware/tegra21x`) and is not included.
 
 Confirmed on the console (Switch OLED): the driver starts with Code 0 and powers the GPU up itself
-(M1 at 0.8 V through the bridge). Nothing is rendered with it yet; that needs Mesa NVK.
+(M1 at 0.8 V through the bridge).
+
+**First drawing on the GPU (2026-11-13).** Their diagnostic KMDF driver `tegragpuprobe`
+(`drivers/build_gpu_probe.sh`, installed by the agent with `agent\gpuprobe\run.flag`, see
+`desktop/gpuprobe.ps1`) runs fixed workloads at 729.6 MHz and reads the pixels back:
+
+| test | result |
+|---|---|
+| blue clear (`--gpu-clear-729`) | pass: 256 pixels and all guard words match |
+| red triangle from a NAK-compiled SM53 shader (`--gpu-draw-729`) | drawn and checked: image hash `F20AF985`, shader hash `FB041DD2`, the same as on their Switch Lite; no GR, MMU or FIFO faults |
+
+The second run ended with an error only because, while powering down, the driver tried to restore
+an M1 voltage code of `0x10` (0.33 V) it had read; the bridge refused it as outside 0.6–1.05 V. The
+rail itself was switched off. This is an offscreen test: nothing is shown on the screen yet. The
+next step is their Mesa NVK Vulkan driver (`vk-triangle` and `vkcube`).
 
 ## Windows Update
 
