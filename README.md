@@ -572,6 +572,11 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
   single-instruction branches. Otherwise the early UEFI hangs, as with the shutdown fix and again
   with the first UHS build.
 - **DDR50 does not work on Tegra210**; SDR104 does, with the hardware tuning set up.
+- **The touch rail (LDO6) is not 2.9 V when Windows starts**: UEFI leaves 1.0 V after a cold
+  start and 2.8 V after a reboot. The shim sets 2.9 V at the UEFI hand-off.
+- **Charging from a computer's USB-C port**: the BQ24193 takes only 500 mA from a port it sees as
+  a USB host, less than Windows draws. `swbatt` raises the limit to the current of the BM92T's PD
+  contract (a Mac offers 5 V 1.5 A: the battery went from -200 mA to +900 mA).
 - **USB 2.0 only (lane 5 left off) blue-screened at boot**: the controller still reports a
   SuperSpeed port, so lane 5 must be set up too.
 
@@ -579,7 +584,7 @@ sudo ./desktop/put_bl33.sh disk4 <card size in bytes> uefi/out/bl33-64.bin wp64
 
 - ARM64: cheaper SD capability masking (drop the full SD page trap).
 - USB: test more devices (flash drives, hubs, the dock); install winx's `tegraxusb` for the
-  Falcon mailbox. Find what leaves the touch supply at 1.0 V.
+  Falcon mailbox. 
 - SD: avoid the retried read at the UHS switch. Windows 10 ARM64 loader with the 48 MHz fix.
 - Wi-Fi: find why it drops (it does so under Bluetooth load, e.g. two Joy-Cons).
 - GPU: Mesa NVK and a first rendered triangle on the OLED.
