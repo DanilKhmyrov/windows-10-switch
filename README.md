@@ -475,8 +475,20 @@ Confirmed on the console (Switch OLED): the driver starts with Code 0 and powers
 
 The second run ended with an error only because, while powering down, the driver tried to restore
 an M1 voltage code of `0x10` (0.33 V) it had read; the bridge refused it as outside 0.6–1.05 V. The
-rail itself was switched off. This is an offscreen test: nothing is shown on the screen yet. The
-next step is their Mesa NVK Vulkan driver (`vk-triangle` and `vkcube`).
+rail itself was switched off.
+
+**First Vulkan draw (2026-11-13).** Their Mesa NVK Vulkan driver, built for Windows ARM64 with
+`drivers/nvk/build.sh` (Docker: Mesa host tools, NVK ICD, Khronos loader, their `vk-triangle`),
+runs on the OLED's GM20B:
+
+- the render driver built with `NATIVE=200` (native submission, without the display panel) starts
+  natively once with the author's one-time permit (`desktop/gpuvk.ps1`, `agent\gpuvk\run.flag`):
+  every start status 0;
+- `nvk-windows-check`: one physical device, the native-ready adapter's LUID matches;
+- `vk-triangle`: `{"vulkan_draw":true,"pixels":1024,"red":300,"blue":724,"guard_bytes":128}`, a
+  Vulkan render pass on the GPU with the pixels read back and checked.
+
+After a reboot the render driver starts in its safe paging-only mode again (the permit is gone).
 
 ## Windows Update
 
