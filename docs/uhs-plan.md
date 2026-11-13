@@ -9,6 +9,9 @@ Results:
   Tegra210 at all (only SDR50/SDR104), so DDR50 is dropped.
 - `sdr50-48`: SDR50 (run as SDR104 per the T210 errata, tap 11, no tuning) with the clock left at
   48 MHz. No speed gain; it only checks that the 1.8 V switch works. Next: 100 MHz, then SDR104.
+  First build hung the early UEFI (squares 2 and 6): the new code sat inside the trap handler
+  and moved it. Rebuilt the Test C way: the old shim keeps every address, four instructions
+  change (adr payload, bl uhs_boot_init, b uhs_pre, b.ne uhs_read) and the new code follows it.
 The main entry runs the card in high speed (3.3 V, 48 MHz, ~21 MB/s) after the base-clock fix.
 
 ## Why the shim

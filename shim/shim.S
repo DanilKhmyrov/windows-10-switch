@@ -249,10 +249,10 @@ enter_aarch64_el1:
     mov32   x3, MMIO_COUNT
     str     wzr, [x3]
 #if UHS_MODE
-    mov32   x3, UHS_STATE
-    stp     xzr, xzr, [x3]
-#endif
+    bl      uhs_boot_init           // same size as the dsb it replaces (it does the dsb)
+#else
     dsb     sy
+#endif
     adr     x3, trap_start
     msr     vbar_el2, x3
     // The handler stack is SP_EL2: the CPU uses it on exception entry. Without SPSel=1
@@ -533,10 +533,12 @@ mmio_trap:
     cmp     x3, #31
     b.eq    1f
     ldr     x5, [sp, x3, lsl #3]
-1:  tbz     x0, #6, 5f
 #if UHS_MODE
-    bl      uhs_write_hook          // may change x5 (the value); keeps x0-x4
+1:  b       uhs_pre                 // same size: the handler keeps its addresses (see uhs_pre)
+#else
+1:  tbz     x0, #6, 5f
 #endif
+.Lmmio_write:
     cmp     x4, #0                  // write
     b.ne    2f
     strb    w5, [x1]
@@ -551,6 +553,7 @@ mmio_trap:
     b       20f
 4:  str     x5, [x1]
     b       20f
+.Lmmio_read:
 5:  cmp     x4, #0                  // read
     b.ne    6f
     ldrb    w5, [x1]
@@ -575,7 +578,7 @@ mmio_trap:
     mov32   x6, 0x700B0040
     cmp     x1, x6
 #if UHS_MODE
-    b.ne    14f
+    b.ne    uhs_read
 #else
     b.ne    13f
 #endif
@@ -585,40 +588,7 @@ mmio_trap:
     // With the real 48 MHz it uses no divider: SD high speed at 48 MHz.
     and     x5, x5, #0xffffffffffff00ff
     orr     x5, x5, #0x3000
-#if UHS_MODE
-    b       13f
-14: // capabilities 1 (0x44): add one UHS mode. UEFI hides SDR50/SDR104.
-    mov32   x6, 0x700B0044
-    cmp     x1, x6
-    b.ne    15f
-#if UHS_MODE == 1
-    orr     x5, x5, #4              // DDR50
-#else
-    orr     x5, x5, #1              // SDR50
-    bic     x5, x5, #(1 << 13)      // without tuning (fixed tap at 48 MHz)
-#endif
-    b       13f
-15:
-#if UHS_MODE == 2
-    // host control 2 while SDR50 runs as SDR104 (T210 errata): show sdbus its own mode 2
-    mov32   x6, UHS_STATE
-    ldr     w7, [x6]
-    tbz     w7, #3, 13f
-    mov32   x6, 0x700B003E
-    cmp     x1, x6
-    b.ne    16f
-    cmp     x4, #1
-    b.ne    13f
-    bic     x5, x5, #1
-    b       13f
-16: mov32   x6, 0x700B003C
-    cmp     x1, x6
-    b.ne    13f
-    cmp     x4, #2
-    b.ne    13f
-    bic     x5, x5, #(1 << 16)
-#endif
-#endif
+.Lmmio_read_done:
 13: tbnz    x0, #15, 10f            // SF: 64-bit register
     mov     w5, w5
 10: cmp     x3, #31
@@ -934,7 +904,112 @@ i2c5_xfer:
     b.ne    .Lpo6
 .Lpo7:  ret
 
-#if UHS_MODE
+    .balign 8
+trap_end:
+#endif
+
+#if TEST_MODE || CHAIN_A32
+// Switch to AArch32: the lower level (EL1) will be 32-bit.
+// x0 goes to r0, x1 = address of the 32-bit code. This path was checked with the white screen.
+enter_aarch32:
+    msr     hcr_el2, xzr
+    msr     cptr_el2, xzr
+    msr     hstr_el2, xzr
+    // UEFI runs at EL1, so give it access to the timer.
+    mov     x2, #3
+    msr     cnthctl_el2, x2
+    msr     cntvoff_el2, xzr
+    mov32   x2, 0x00C50838          // SCTLR reset value: MMU and caches off.
+    msr     sctlr_el1, x2
+    mov     x2, #0x1D3              // SVC mode, interrupts masked.
+    msr     spsr_el2, x2
+    msr     elr_el2, x1
+    dsb     sy
+    isb
+    eret
+#endif
+
+// w0 = colour. Clobbers x1, x2.
+fill_screen:
+    mov32   x1, FB_BASE
+    mov32   x2, FB_PIXELS
+1:  str     w0, [x1], #4
+    subs    x2, x2, #1
+    b.ne    1b
+    dsb     sy
+    ret
+
+// Accessing the UART with its clock off can hang the bus,
+// so ask the clock controller first.
+uart_setup:
+    mov     x20, #0
+    mov32   x1, CAR_BASE
+    ldr     w2, [x1, #CLK_ENB_L]
+    tbz     w2, #UARTB_BIT, 9f
+    ldr     w2, [x1, #RST_DEV_L]
+    tbnz    w2, #UARTB_BIT, 9f
+
+    mov32   x1, UART_BASE
+    str     wzr, [x1, #UART_IER]
+    mov     w2, #0x83               // DLAB + 8 bits
+    str     w2, [x1, #UART_LCR]
+    mov     w2, #UART_DIV
+    str     w2, [x1, #UART_THR]
+    str     wzr, [x1, #UART_IER]
+    mov     w2, #0x03               // 8n1
+    str     w2, [x1, #UART_LCR]
+    ldr     w2, [x1, #UART_SPR]
+    mov     w2, #0x01
+    str     w2, [x1, #UART_FCR]
+    ldr     w2, [x1, #UART_SPR]
+    str     wzr, [x1, #UART_MCR]
+    mov     w2, #0x07               // Clear the FIFOs
+    str     w2, [x1, #UART_FCR]
+    mov     x20, #1
+9:  ret
+
+// w0 = character. Clobbers x1, x2, x3.
+putc:
+    cbz     x20, 3f
+    mov32   x1, UART_BASE
+    mov32   w3, 0x100000            // Wait limit: never hang on the UART.
+1:  ldr     w2, [x1, #UART_LSR]
+    tbnz    w2, #5, 2f
+    subs    w3, w3, #1
+    b.ne    1b
+    ret
+2:  str     w0, [x1, #UART_THR]
+3:  ret
+
+// x0 = string. Clobbers x0-x4, keeps the return address in x5.
+puts:
+    mov     x5, x30
+    mov     x4, x0
+1:  ldrb    w0, [x4], #1
+    cbz     w0, 2f
+    bl      putc
+    b       1b
+2:  ret     x5
+
+msg_hello:  .asciz "\r\n[wp-shim] started\r\n"
+msg_el:     .asciz "[wp-shim] CurrentEL="
+msg_nl:     .asciz "\r\n"
+msg_jump:   .asciz "[wp-shim] jumping to UEFI\r\n"
+    .balign 4
+
+#if TEST_MODE
+a32_code:
+    .incbin A32_BIN
+#endif
+
+#if UHS_MODE && !TEST_MODE && !CHAIN_A32
+// UHS state reset at boot (DRAM keeps it over a reboot).
+uhs_boot_init:
+    mov32   x3, UHS_STATE
+    stp     xzr, xzr, [x3]
+    dsb     sy
+    ret
+
 // SD UHS-I DDR50 under Windows. sdbus does the SD side (CMD11, CMD6) and the standard SDHCI
 // registers; the Tegra side is done here, when sdbus writes the register that needs it, with
 // the steps of hekate's sdmmc_enable_low_voltage and sdmmc_setup_clock (T210B01 values):
@@ -945,6 +1020,48 @@ i2c5_xfer:
 // - reset all while DDR50 is on: clock back to 48 MHz for the new identification.
 // In: x1 = address, x4 = width (1 = 16 bit, 2 = 32 bit), x5 = value. Keeps x0-x4, may change
 // x5. Clobbers x6-x17. Runs with interrupts masked, at most ~15 ms.
+// Entry points from mmio_trap. The early UEFI hangs (squares 2 and 6) when code inside the trap
+// handler moves, so the handler only has two branch instructions changed and everything new
+// is here, after it.
+uhs_pre:
+    tbz     x0, #6, .Lmmio_read
+    bl      uhs_write_hook          // may change x5 (the value); keeps x0-x4
+    b       .Lmmio_write
+
+// Read of any SD page register except capabilities 0; x1 = address, x4 = width, x5 = value.
+uhs_read:
+    mov32   x6, 0x700B0044          // capabilities 1: add one UHS mode (UEFI hides SDR50/SDR104)
+    cmp     x1, x6
+    b.ne    1f
+#if UHS_MODE == 1
+    orr     x5, x5, #4              // DDR50
+#else
+    orr     x5, x5, #1              // SDR50
+    bic     x5, x5, #(1 << 13)      // without tuning (fixed tap at 48 MHz)
+#endif
+    b       .Lmmio_read_done
+1:
+#if UHS_MODE == 2
+    // host control 2 while SDR50 runs as SDR104 (T210 errata): show sdbus its own mode 2
+    mov32   x6, UHS_STATE
+    ldr     w7, [x6]
+    tbz     w7, #3, .Lmmio_read_done
+    mov32   x6, 0x700B003E
+    cmp     x1, x6
+    b.ne    2f
+    cmp     x4, #1
+    b.ne    .Lmmio_read_done
+    bic     x5, x5, #1
+    b       .Lmmio_read_done
+2:  mov32   x6, 0x700B003C
+    cmp     x1, x6
+    b.ne    .Lmmio_read_done
+    cmp     x4, #2
+    b.ne    .Lmmio_read_done
+    bic     x5, x5, #(1 << 16)
+#endif
+    b       .Lmmio_read_done
+
 uhs_write_hook:
     stp     x29, x30, [sp, #-16]!
     mov32   x6, SD_BASE
@@ -1266,103 +1383,6 @@ uhs_ddr_off:
     ret
 #endif
 
-    .balign 8
-trap_end:
-#endif
-
-#if TEST_MODE || CHAIN_A32
-// Switch to AArch32: the lower level (EL1) will be 32-bit.
-// x0 goes to r0, x1 = address of the 32-bit code. This path was checked with the white screen.
-enter_aarch32:
-    msr     hcr_el2, xzr
-    msr     cptr_el2, xzr
-    msr     hstr_el2, xzr
-    // UEFI runs at EL1, so give it access to the timer.
-    mov     x2, #3
-    msr     cnthctl_el2, x2
-    msr     cntvoff_el2, xzr
-    mov32   x2, 0x00C50838          // SCTLR reset value: MMU and caches off.
-    msr     sctlr_el1, x2
-    mov     x2, #0x1D3              // SVC mode, interrupts masked.
-    msr     spsr_el2, x2
-    msr     elr_el2, x1
-    dsb     sy
-    isb
-    eret
-#endif
-
-// w0 = colour. Clobbers x1, x2.
-fill_screen:
-    mov32   x1, FB_BASE
-    mov32   x2, FB_PIXELS
-1:  str     w0, [x1], #4
-    subs    x2, x2, #1
-    b.ne    1b
-    dsb     sy
-    ret
-
-// Accessing the UART with its clock off can hang the bus,
-// so ask the clock controller first.
-uart_setup:
-    mov     x20, #0
-    mov32   x1, CAR_BASE
-    ldr     w2, [x1, #CLK_ENB_L]
-    tbz     w2, #UARTB_BIT, 9f
-    ldr     w2, [x1, #RST_DEV_L]
-    tbnz    w2, #UARTB_BIT, 9f
-
-    mov32   x1, UART_BASE
-    str     wzr, [x1, #UART_IER]
-    mov     w2, #0x83               // DLAB + 8 bits
-    str     w2, [x1, #UART_LCR]
-    mov     w2, #UART_DIV
-    str     w2, [x1, #UART_THR]
-    str     wzr, [x1, #UART_IER]
-    mov     w2, #0x03               // 8n1
-    str     w2, [x1, #UART_LCR]
-    ldr     w2, [x1, #UART_SPR]
-    mov     w2, #0x01
-    str     w2, [x1, #UART_FCR]
-    ldr     w2, [x1, #UART_SPR]
-    str     wzr, [x1, #UART_MCR]
-    mov     w2, #0x07               // Clear the FIFOs
-    str     w2, [x1, #UART_FCR]
-    mov     x20, #1
-9:  ret
-
-// w0 = character. Clobbers x1, x2, x3.
-putc:
-    cbz     x20, 3f
-    mov32   x1, UART_BASE
-    mov32   w3, 0x100000            // Wait limit: never hang on the UART.
-1:  ldr     w2, [x1, #UART_LSR]
-    tbnz    w2, #5, 2f
-    subs    w3, w3, #1
-    b.ne    1b
-    ret
-2:  str     w0, [x1, #UART_THR]
-3:  ret
-
-// x0 = string. Clobbers x0-x4, keeps the return address in x5.
-puts:
-    mov     x5, x30
-    mov     x4, x0
-1:  ldrb    w0, [x4], #1
-    cbz     w0, 2f
-    bl      putc
-    b       1b
-2:  ret     x5
-
-msg_hello:  .asciz "\r\n[wp-shim] started\r\n"
-msg_el:     .asciz "[wp-shim] CurrentEL="
-msg_nl:     .asciz "\r\n"
-msg_jump:   .asciz "[wp-shim] jumping to UEFI\r\n"
-    .balign 4
-
-#if TEST_MODE
-a32_code:
-    .incbin A32_BIN
-#endif
 
     // build.py pads the file to a multiple of 8 bytes and appends UEFI right after it.
     .balign 8
