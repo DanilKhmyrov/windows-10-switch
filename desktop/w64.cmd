@@ -12,6 +12,9 @@ reg query HKLM\SYSTEM\Setup /v SystemSetupInProgress 2>nul | find "0x1" >nul && 
   echo -- setup in progress, nothing else to do >> %LOG%
   goto :eof
 )
+rem The GPU desktop test first, before everything else (also before the once-per-version block):
+rem the GPU driver needs 16 MB of contiguous memory, which is only there early after boot.
+call :gpudesk %1
 rem Settings that only need to be applied once per agent version: skipped while this w64.cmd
 rem equals the copy saved after the last full run. The agent used to spend minutes on every boot
 rem here (PowerShell is slow on this CPU and SD card) while the user was already working.
@@ -35,8 +38,6 @@ rem Passwords never expire: once Wi-Fi syncs the clock (2022 -> today), the empt
 rem Player set during setup would count as years old and Windows would force a change.
 net accounts /maxpwage:unlimited >> %LOG% 2>&1
 powershell -NoProfile -Command "Get-LocalUser | Where-Object Enabled | Set-LocalUser -PasswordNeverExpires $true" >> %LOG% 2>&1
-rem The GPU desktop test first: the driver needs 16 MB of contiguous memory, easier to get early.
-call :gpudesk %1
 call :crashdumps %1
 call :onedrive
 call :noupdate
