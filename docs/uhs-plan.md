@@ -1,7 +1,7 @@
 # SD UHS-I for Windows through the shim (plan)
 
 Status: step 1 (DDR50) implemented behind `shim/build.py --uhs`, being tested in a separate Hekate entry.
-(3.3 V, 48 MHz, ~21 MB/s) after the base-clock fix in the shim.
+The main entry runs the card in high speed (3.3 V, 48 MHz, ~21 MB/s) after the base-clock fix.
 
 ## Why the shim
 
