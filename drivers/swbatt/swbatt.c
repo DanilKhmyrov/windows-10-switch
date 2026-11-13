@@ -366,6 +366,17 @@ static VOID Shutdown(VOID)
 }
 
 // Read-only access to the clock registers, to log the current CPU and memory clocks.
+static VOID LogHex8(ULONG value)
+{
+    static const CHAR digits[] = "0123456789ABCDEF";
+    CHAR text[9];
+
+    for (ULONG i = 0; i < 8; i++)
+        text[i] = digits[(value >> (28 - i * 4)) & 0xF];
+    text[8] = 0;
+    LogText(text);
+}
+
 static VOID LogClocks(VOID)
 {
     static const USHORT regs[] = { 0x020, 0x024, 0x0E0, 0x0E4, 0x0E8, 0x090, 0x094, 0x5E8, 0x19C, 0x370, 0x374 };
@@ -390,6 +401,29 @@ static VOID LogClocks(VOID)
         LogText(" hidrev=");                    // bits 7:4: 1 = T210 (Erista), 2 = T210B01 (Mariko)
         LogNum((LONG) car[0x804 / 4]);
         MmUnmapIoSpace((PVOID) car, 0x1000);
+    }
+    // SD card controller as Windows (sdbus) left it, read only: SDMMC1 clock source in the CAR,
+    // then the SDHCI registers (reads of this page go through the shim's stage-2 trap): present
+    // state, host control 1 (bus width, high speed), clock control (divider, enable), host
+    // control 2, capabilities, version, and the Tegra vendor clock control.
+    address.QuadPart = 0x60006000ULL;
+    car = MmMapIoSpace(address, 0x1000, MmNonCached);
+    if (car != NULL) {
+        LogText(" sd_clk_src=");
+        LogHex8(car[0x150 / 4]);
+        MmUnmapIoSpace((PVOID) car, 0x1000);
+    }
+    address.QuadPart = 0x700B0000ULL;
+    car = MmMapIoSpace(address, 0x200, MmNonCached);
+    if (car != NULL) {
+        static const USHORT sd[] = { 0x24, 0x28, 0x2C, 0x3C, 0x40, 0x44, 0xFC, 0x100 };
+        for (ULONG i = 0; i < sizeof(sd) / sizeof(sd[0]); i++) {
+            LogText(" sd");
+            LogNum(sd[i]);
+            LogText("=");
+            LogHex8(car[sd[i] / 4]);
+        }
+        MmUnmapIoSpace((PVOID) car, 0x200);
     }
     // CPU voltage: MAX77812 regulator (I2C5, 0x31 or 0x33), register M4_VOUT, read only.
     address.QuadPart = 0x7000D000ULL;
