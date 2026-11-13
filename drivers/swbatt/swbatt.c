@@ -456,6 +456,33 @@ static VOID LogShim(VOID)
     LogText("\r\n");
 }
 
+// Display controller (DC A, 0x54200000) as UEFI left it: the registers mesa-switch-woa's WDDM
+// display driver compares with the Switch Lite's panel before it takes over the boot framebuffer
+// (platform/t214_dc.c, tg_t214_dc_has_boot_mode). Read once at start, reads only.
+static VOID LogHex4(ULONG value);
+
+static VOID LogDisplay(VOID)
+{
+    static const USHORT words[] = { 0x032, 0x402, 0x407, 0x408, 0x409, 0x40a, 0xb80, 0xb81, 0xb82,
+        0xb83, 0xb84, 0xb85, 0xb86, 0xb87, 0xb88, 0xb89, 0xb8a, 0xbc0, 0xbc6, 0xbc8, 0xbcb, 0xbcd };
+    PHYSICAL_ADDRESS address;
+    volatile ULONG *dc;
+
+    address.QuadPart = 0x54200000ULL;
+    dc = MmMapIoSpace(address, 0x4000, MmNonCached);
+    if (dc == NULL)
+        return;
+    LogText("dc");
+    for (ULONG i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+        LogText(" ");
+        LogHex4(words[i]);
+        LogText("=");
+        LogHex8(dc[words[i]]);
+    }
+    LogText("\r\n");
+    MmUnmapIoSpace((PVOID) dc, 0x4000);
+}
+
 static VOID LogClocks(VOID)
 {
     static const USHORT regs[] = { 0x020, 0x024, 0x0E0, 0x0E4, 0x0E8, 0x090, 0x094, 0x5E8, 0x19C, 0x370, 0x374 };
@@ -1218,6 +1245,7 @@ VOID PollThread(PVOID context)
     delay.QuadPart = -10000LL * JACK_MS;
     RtlZeroMemory(&old, sizeof(old));
     LogClocks();
+    LogDisplay();
     JackStart();
     UsbStart();
     SaveLog();
