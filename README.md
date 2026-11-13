@@ -524,6 +524,9 @@ installs them and switches the running desktop once with the one-time permit:
   take 0.2 ms. Firefox did not use the GPU (no tgd3d events from it). Users see it as "not
   very smooth"; video stuttered at first and then played.
 
+![Windows 11 desktop drawn by the GM20B on the Switch OLED, portrait; Task Manager shows the
+GPU "Tegra X1 (GM20B) .202" with its 3D load](docs/images/gpu-desktop-taskmanager.jpg)
+
 ## Windows Update
 
 `w64.cmd` turns Windows Update off on every boot:
