@@ -61,5 +61,8 @@ lib=/out/loader/install/lib/libvulkan-1.dll.a      # MinGW import library of the
 python3 /mesa/tegra-x1-wddm/tools/build_offscreen_triangle.py --cc aarch64-w64-mingw32-clang \
     --vulkan-include /out/loader/install/include --loader-dll /out/loader/install/bin/vulkan-1.dll \
     --loader-lib "$lib" --out /out/triangle
-ls -la /out/icd/libvulkan_nouveau.dll /out/icd/nvk_windows_icd.json /out/loader/install/bin/vulkan-1.dll /out/triangle
+# NVK'"'"'s Rust code imports LLVM-MinGW'"'"'s libunwind.dll: ship it beside the ICD and the test.
+cp /opt/llvm-mingw/aarch64-w64-mingw32/bin/libunwind.dll /out/icd/
+cp /opt/llvm-mingw/aarch64-w64-mingw32/bin/libunwind.dll /out/triangle/
+ls -la /out/icd/libunwind.dll /out/icd/libvulkan_nouveau.dll /out/icd/nvk_windows_icd.json /out/loader/install/bin/vulkan-1.dll /out/triangle
 '
