@@ -12,6 +12,18 @@ if (-not (Test-Path $zip) -or -not (Test-Path $key)) { 'ssh: no package or key o
 $dest = 'C:\Program Files\OpenSSH'
 $data = 'C:\ProgramData\ssh'
 
+# Reinstall when the package on the card changed (10.4 dropped every connection right after
+# accepting it on this console; 9.5 is the version Windows 11 itself ships).
+$changed = $false
+$zipHash = (Get-FileHash $zip).Hash
+$mark = Join-Path $dest 'package.sha256'
+if ((Get-Service sshd -ErrorAction SilentlyContinue) -and
+        (-not (Test-Path $mark) -or (Get-Content $mark -Raw).Trim() -ne $zipHash)) {
+    'ssh: removing the previous OpenSSH'
+    Stop-Service sshd -Force -ErrorAction SilentlyContinue
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest 'uninstall-sshd.ps1')
+    Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
+}
 if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {
     'ssh: installing OpenSSH'
     $tmp = Join-Path $env:TEMP 'openssh-unpack'
@@ -21,6 +33,8 @@ if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {
     Move-Item (Join-Path $tmp 'OpenSSH-ARM64') $dest
     Remove-Item $tmp -Recurse -Force
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest 'install-sshd.ps1')
+    Set-Content -Path $mark -Value $zipHash -Encoding ascii
+    $changed = $true
 }
 
 # Configuration: keys only; the key goes both to the administrators' file and to the user's own.
@@ -37,9 +51,8 @@ KbdInteractiveAuthentication no
 AuthorizedKeysFile .ssh/authorized_keys __PROGRAMDATA__/ssh/administrators_authorized_keys
 Subsystem sftp sftp-server.exe
 SyslogFacility LOCAL0
-LogLevel VERBOSE
+LogLevel DEBUG3
 "@
-$changed = $false
 $cfgFile = Join-Path $data 'sshd_config'
 if (-not (Test-Path $cfgFile) -or (Get-Content $cfgFile -Raw) -ne $config) {
     Set-Content -Path $cfgFile -Value $config -NoNewline -Encoding ascii
@@ -66,6 +79,8 @@ if (-not (Get-NetFirewallRule -Name 'sshd-local' -ErrorAction SilentlyContinue))
         -Direction Inbound -Protocol TCP -LocalPort 22 -RemoteAddress LocalSubnet -Action Allow | Out-Null
     'ssh: firewall rule added (local subnet)'
 }
+# Host keys readable by SYSTEM and Administrators only: sshd refuses keys others can read.
+& powershell -NoProfile -ExecutionPolicy Bypass -Command "Import-Module '$dest\OpenSSHUtils.psd1' -Force; & '$dest\FixHostFilePermissions.ps1' -Confirm:`$false" 2>&1 | Out-Null
 Set-Service sshd -StartupType Automatic
 if ($changed) { Restart-Service sshd -Force; 'ssh: configured, sshd restarted' } else { Start-Service sshd }
 "ssh: sshd $((Get-Service sshd).Status), user $user"
