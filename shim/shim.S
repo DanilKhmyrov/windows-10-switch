@@ -77,7 +77,8 @@
 #ifndef UHS_MODE
 #define UHS_MODE    0               // experimental SD UHS-I (shim/build.py --uhs): 1 = DDR50,
                                     // 2 = SDR50 with the clock kept at 48 MHz,
-                                    // 3 = SDR50 at 90.7 MHz with hardware tuning
+                                    // 3 = SDR50 at 90.7 MHz with hardware tuning,
+                                    // 4 = SDR104 at 204 MHz (and SDR50 as in 3)
 #endif
 #define UHS_STATE   (TRAP_BASE + 0xF30)  // flags, last host control 2, saved vendor clock control,
                                          // voltage switches; flags: 1 = 1.8 V, 2 = DDR50 clock,
@@ -1039,8 +1040,10 @@ uhs_read:
 #elif UHS_MODE == 2
     orr     x5, x5, #1              // SDR50
     bic     x5, x5, #(1 << 13)      // without tuning (fixed tap at 48 MHz)
-#else
+#elif UHS_MODE == 3
     orr     x5, x5, #1              // SDR50, with tuning (bit 13 stays)
+#else
+    orr     x5, x5, #3              // SDR50 and SDR104, with tuning
 #endif
     b       .Lmmio_read_done
 1:
@@ -1095,7 +1098,7 @@ uhs_write_hook:
     tbnz    w13, #1, .Luhs_ret
     bl      uhs_ddr_on
     b       .Luhs_ret
-#else
+#elif UHS_MODE == 2
     bic     w13, w13, #8
     cmp     w14, #2                 // SDR50: the host runs it as SDR104 (T210 errata), tap 11
     b.ne    17f
@@ -1106,22 +1109,46 @@ uhs_write_hook:
     b       19f
 18: orr     x5, x5, #(1 << 16)      // 32-bit write at 0x3C
 19: str     w13, [x6]
-#if UHS_MODE == 3
+    bl      uhs_tap
+    b       .Luhs_ret
+17: str     w13, [x6]
+    b       .Luhs_ret
+#else
+    // SDR50 (90.7 MHz, run as SDR104 per the T210 errata, 256 tuning tries) and, in mode 4,
+    // SDR104 (204 MHz, 128 tries). w20 = SDMMC1 clock divider, w21 = tuning tries field.
+    bic     w13, w13, #8
+    cmp     w14, #2
+    b.ne    21f
+    mov     w20, #7
+    mov     w21, #(4 << 13)
+    orr     w13, w13, #8
+    cmp     x4, #1
+    b.ne    18f
+    orr     x5, x5, #1              // 16-bit write: mode 2 -> 3
+    b       19f
+18: orr     x5, x5, #(1 << 16)      // 32-bit write at 0x3C
+    b       19f
+21:
+#if UHS_MODE == 4
+    cmp     w14, #3
+    b.ne    17f
+    mov     w20, #2                 // 408 * 2 / 4 = 204 MHz
+    mov     w21, #(2 << 13)
+    b       19f
+#else
+    b       17f
+#endif
+19: str     w13, [x6]
     tbz     w12, #6, 20f            // execute tuning: set up the Tegra hardware tuning
     bl      uhs_tuning
     b       .Luhs_ret
 20: tbnz    w13, #1, .Luhs_ret      // fast clock already on (this is a later write)
     bl      uhs_tap
     bl      uhs_clk_fast
-#else
-    bl      uhs_tap
-#endif
     b       .Luhs_ret
 17: str     w13, [x6]
-#if UHS_MODE == 3
     tbz     w13, #1, .Luhs_ret
     bl      uhs_clk_slow
-#endif
     b       .Luhs_ret
 #endif
 3:
@@ -1353,8 +1380,8 @@ uhs_clk_off:
 // SDR50: SDMMC1 from PLLP with divider 7: 408 * 2 / 9 = 90.7 MHz (hekate uses 99.84 MHz from
 // PLLC4, which UEFI may not have running). sdbus asks for 100 MHz from a 48 MHz base: no SDHCI
 // divider, so the card gets the 90.7 MHz.
-uhs_clk_fast:
-    mov     w12, #7
+uhs_clk_fast:                       // w20 = divider
+    mov     w12, w20
     mov     w13, #2
     b       1f
 uhs_clk_slow:
@@ -1383,14 +1410,14 @@ uhs_clk_slow:
     ret
 
 // sdbus starts tuning (execute tuning in host control 2, then CMD19 until the bit clears): the
-// Tegra tuning setup of hekate's sdmmc_tuning_execute for SDR50: 256 tries, step 1, 1x multiplier.
+// Tegra tuning setup of hekate's sdmmc_tuning_execute: w21 = tries, step 1, 1x multiplier.
 uhs_tuning:
     mov32   x8, SD_BASE
     str     wzr, [x8, #0x1C4]       // ventunctl1: step size 1
     ldr     w9, [x8, #0x1C0]
     mov32   w10, 0xFFFF1FFF
     and     w9, w9, w10
-    orr     w9, w9, #(4 << 13)      // 256 tries
+    orr     w9, w9, w21         // tries: 256 (SDR50) or 128 (SDR104)
     mov32   w10, 0xFFFFE03F
     and     w9, w9, w10
     orr     w9, w9, #(1 << 6)       // 1x multiplier
