@@ -39,6 +39,10 @@ Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | ForEach-Object { Lo
 
 Log '-- 1. display driver'
 $dst = 'C:\swagent\gpudesk'
+# The 16 MB of contiguous memory the driver needs is only there early after boot: when the
+# driver is already installed and registered, go straight to the switch.
+$ready = (Prop DriverVersion) -eq '0.1.0.202' -and (Test-Path "$dst\app\TegraGpuD3DVk.dll")
+if ($ready) { Log '  already installed, switching at once'; Copy-Item (Join-Path $src 'app\*') "$dst\app" -Force } else {
 if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
 New-Item -ItemType Directory -Force "$dst\driver", "$dst\app" | Out-Null
 Copy-Item (Join-Path $src 'driver\*') "$dst\driver"
@@ -50,6 +54,7 @@ pnputil /add-driver "$dst\driver\tegragpurender.inf" /install 2>&1 | ForEach-Obj
 Start-Sleep -Seconds 10
 Log (State)
 if ((Prop DriverVersion) -ne '0.1.0.202') { Log 'the display driver is not bound, stopped'; exit 1 }
+}
 
 Log '-- 2. tgd3d and NVK registration'
 $subkey = 'SYSTEM\CurrentControlSet\Control\Class\' + (Prop Driver)
@@ -73,8 +78,8 @@ Get-EtwTraceSession -Name swgpu -ErrorAction SilentlyContinue | Remove-EtwTraceS
 try {
     New-EtwTraceSession -Name swgpu -LogFileMode 0x22 -MaximumFileSize 32 -LocalFilePath $etl -BufferSize 64 `
         -MinimumBuffers 4 -MaximumBuffers 16 -FlushTimer 1 -ClockType Performance | Out-Null
-    Add-EtwTraceProvider -Guid '{5f0c4c6e-7a0b-4b52-9d3a-2f6d1e8b4a11}' -SessionName swgpu -Level 5 -MatchAnyKeyword 0xFFFFFFFF | Out-Null
-    Add-EtwTraceProvider -Guid '{c27c1f9b-62e8-4e21-b29b-6bb2d585c6d0}' -SessionName swgpu -Level 5 -MatchAnyKeyword 0xFFFFFFFF | Out-Null
+    Add-EtwTraceProvider -Guid '{5f0c4c6e-7a0b-4b52-9d3a-2f6d1e8b4a11}' -SessionName swgpu -Level 5 -MatchAnyKeyword 4294967295 | Out-Null
+    Add-EtwTraceProvider -Guid '{c27c1f9b-62e8-4e21-b29b-6bb2d585c6d0}' -SessionName swgpu -Level 5 -MatchAnyKeyword 4294967295 | Out-Null
     Log "  trace session swgpu -> $etl"
 } catch { Log "  trace not started: $($_.Exception.Message)" }
 
