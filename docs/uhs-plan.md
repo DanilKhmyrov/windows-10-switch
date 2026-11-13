@@ -22,6 +22,8 @@ Results:
   boot to the agent 131 s, no disk errors in the System log.
 - `sdr104`: SDR50 also reported as SDR104; SDR104 runs SDMMC1 at 204 MHz from PLLP (divider 2;
   hekate: 199.68 MHz from PLLC4), tuning with 128 tries.
+  Result (2026-11-13): works. Sequential 68.9 MB/s (3.3x the 20.7 of high speed), 1689 random
+  4K/s, boot to the agent 118 s, no disk errors in the System log.
 The main entry runs the card in high speed (3.3 V, 48 MHz, ~21 MB/s) after the base-clock fix.
 
 ## Why the shim
