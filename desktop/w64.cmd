@@ -97,6 +97,7 @@ reg query HKLM\SYSTEM\CurrentControlSet\Enum\HID /s /f SWTS >> %LOG% 2>&1
 copy /y C:\swagent\bat.txt %1:\agent\bat64.txt >nul 2>&1
 powercfg /batteryreport /output %1:\agent\battery64.html >> %LOG% 2>&1
 call :gpureport
+call :perf %1
 echo -- system >> %LOG%
 wmic cpu get NumberOfLogicalProcessors,CurrentClockSpeed >> %LOG% 2>&1
 wmic OS get FreePhysicalMemory,TotalVisibleMemorySize >> %LOG% 2>&1
@@ -355,6 +356,24 @@ for %%F in (C:\swagent\dumps\*.dmp) do if not exist "%1:\agent\dumps\%%~nxF" (
   echo %%~nxF >> %LOG%
   copy /y "%%F" %1:\agent\dumps\ >nul 2>&1
 )
+goto :eof
+
+rem One-time performance measurement when agent\perf.flag exists (the flag goes first): the
+rem last boot times recorded by Windows, then WinSAT disk (sequential and random 4 KB reads of C:),
+rem CPU and memory. Results go to the log and to agent\perf.txt.
+:perf
+if not exist %1:\agent\perf.flag goto :eof
+del %1:\agent\perf.flag
+echo -- perf >> %LOG%
+set PF=%1:\agent\perf.txt
+echo ==== perf %date% %time% >> %PF%
+powershell -NoProfile -Command "Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Diagnostics-Performance/Operational'; Id=100} -MaxEvents 5 -ErrorAction SilentlyContinue | ForEach-Object { $x=[xml]$_.ToXml(); $d=@{}; $x.Event.EventData.Data | ForEach-Object { $d[$_.Name]=$_.'#text' }; 'boot ' + $_.TimeCreated + ' total_ms=' + $d.BootTime + ' mainpath_ms=' + $d.MainPathBootTime + ' postboot_ms=' + $d.BootPostBootTime }" >> %PF% 2>&1
+winsat disk -seq -read -drive c >> %PF% 2>&1
+winsat disk -ran -read -drive c >> %PF% 2>&1
+winsat cpuformal >> %PF% 2>&1
+winsat mem >> %PF% 2>&1
+echo ==== perf done %time% >> %PF%
+type %PF% >> %LOG%
 goto :eof
 
 rem Windows Update off, on every boot (Windows may turn parts of it back on). A feature update
