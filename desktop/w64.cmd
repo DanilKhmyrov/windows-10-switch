@@ -112,6 +112,7 @@ copy /y C:\swagent\bat.txt %1:\agent\bat64.txt >nul 2>&1
 powercfg /batteryreport /output %1:\agent\battery64.html >> %LOG% 2>&1
 call :gpureport
 call :perf %1
+call :gpuprobe %1
 echo -- system >> %LOG%
 wmic cpu get NumberOfLogicalProcessors,CurrentClockSpeed >> %LOG% 2>&1
 wmic OS get FreePhysicalMemory,TotalVisibleMemorySize >> %LOG% 2>&1
@@ -375,6 +376,14 @@ for %%F in (C:\swagent\dumps\*.dmp) do if not exist "%1:\agent\dumps\%%~nxF" (
   echo %%~nxF >> %LOG%
   copy /y "%%F" %1:\agent\dumps\ >nul 2>&1
 )
+goto :eof
+
+rem One-time GPU drawing test (GPU Test loader only) when agent\gpuprobe\run.flag exists:
+rem gpuprobe.ps1 installs the diagnostic driver and writes agent\gpuprobe\result.txt.
+:gpuprobe
+if not exist %1:\agent\gpuprobe\run.flag goto :eof
+echo -- gpuprobe >> %LOG%
+powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\gpuprobe.ps1 %1:\agent >> %LOG% 2>&1
 goto :eof
 
 rem One-time performance measurement when agent\perf.flag exists (the flag goes first): the
