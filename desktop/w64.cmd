@@ -43,6 +43,7 @@ copy /y %~f0 C:\swagent\w64-applied.cmd >nul 2>&1
 :afteronce
 call :removewin10 %1
 call :dumpcopy %1
+call :ssh %1
 set WIFIREBOOT=
 call :wifi %1
 call :bt %1
@@ -415,6 +416,16 @@ reg add "%DEF%\Scan" /v ScheduleDay /t REG_DWORD /d 8 /f >> %LOG% 2>&1
 powershell -NoProfile -Command "Set-MpPreference -DisableRealtimeMonitoring $true -DisableBehaviorMonitoring $true -DisableIOAVProtection $true -MAPSReporting 0 -SubmitSamplesConsent 2 -SignatureScheduleDay 8 -ScanScheduleDay 8 -ErrorAction SilentlyContinue; Get-ScheduledTask -TaskPath '\Microsoft\Windows\Windows Defender\' -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null; $s=Get-MpComputerStatus -ErrorAction SilentlyContinue; 'defender: tamper protection ' + $s.IsTamperProtected + ', real-time ' + $s.RealTimeProtectionEnabled" >> %LOG% 2>&1
 del /q C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Temp\mpam-*.exe >nul 2>&1
 del /q C:\Windows\LiveKernelReports\*.dmp >nul 2>&1
+goto :eof
+
+rem OpenSSH server (Windows 11) from agent\ssh, by ssh_setup.ps1: key login from the Mac only.
+rem The network address is written to agent\ip.txt about 90 s later, once Wi-Fi is up.
+:ssh
+if not exist %1:\agent\ssh\authorized_keys goto :eof
+ver | find "10.0.22" >nul || goto :eof
+echo -- ssh >> %LOG%
+powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\ssh_setup.ps1 %1:\agent >> %LOG% 2>&1
+start "" /b cmd /c "timeout /t 90 /nobreak >nul & ipconfig > %1:\agent\ip.txt 2>&1"
 goto :eof
 
 rem Windows Update off, on every boot (Windows may turn parts of it back on). A feature update
