@@ -1,0 +1,15 @@
+diff --git a/AcpiTables/Dsdt/Dsdt.asl b/AcpiTables/Dsdt/Dsdt.asl
+--- a/AcpiTables/Dsdt/Dsdt.asl
++++ b/AcpiTables/Dsdt/Dsdt.asl
+@@ -352,5 +352,11 @@
+                 Memory32Fixed (ReadOnly, 0x7000FB04, 0x00000004)
+                 Memory32Fixed (ReadWrite, 0x60004414, 0x0000001C)   // LIC bank 4: nonstall SPI 158 to the CPU
++                // GPUDISPLAY=1: display ownership for the WDDM display build of the driver
++                // (their SWITCH_LITE_GPU_POST): the POST framebuffer Hekate and UEFI scan out,
++                // Display A's registers and its interrupt (third, after the GPU lines).
++                Memory32Fixed (ReadWrite, 0xF5A00000, 0x00384000)   // POST framebuffer
++                Memory32Fixed (ReadWrite, 0x54200000, 0x00004000)   // Display A
+                 Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 189 }  // stall
+                 Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 190 }  // nonstall
++                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 105 }  // Display A
+             })

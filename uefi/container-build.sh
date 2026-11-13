@@ -31,6 +31,9 @@ for patch in /project/patches/*.patch; do
     case "$patch" in *-win11only.patch) [ "${WIN11:-0}" = 1 ] || continue;; esac
     # *-gputestonly.patch: only for GPUTEST=1: test loader with the GPU power check (Windows 11 builds).
     case "$patch" in *-gputestonly.patch) [ "${GPUTEST:-0}" = 1 ] || continue;; esac
+    # *-gpudisplayonly.patch: only for GPUDISPLAY=1 (with GPUTEST=1): GPU0 also owns the boot
+    # framebuffer and Display A, for the WDDM display build of the GPU driver.
+    case "$patch" in *-gpudisplayonly.patch) [ "${GPUDISPLAY:-0}" = 1 ] || continue;; esac
     git -C NintendoSwitchPkg apply "$patch"
 done
 

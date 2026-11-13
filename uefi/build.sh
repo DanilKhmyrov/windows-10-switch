@@ -11,6 +11,7 @@ docker run --rm \
     -e CLEAN \
     -e WIN11 \
     -e GPUTEST \
+    -e GPUDISPLAY \
     -v switch-wp-edk2:/work \
     -v "$PROJECT:/project" \
     switch-wp-uefi bash /project/uefi/container-build.sh
