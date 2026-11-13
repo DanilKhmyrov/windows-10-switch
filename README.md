@@ -493,6 +493,22 @@ window on the console's desktop: a red triangle on blue, confirmed on the OLED s
 
 After a reboot the render driver starts in its safe paging-only mode again (the permit is gone).
 
+**First desktop on the GPU (2026-11-14).** The "GPU Desktop" entry (UEFI `GPUTEST=1 GPUDISPLAY=1`:
+GPU0 also owns the boot framebuffer, Display A and its interrupt) runs the author's WDDM display
+build of the driver (tgd3d-vulkan branch, `drivers/nvk/build_desktop.sh`, 0.1.0.202) with tgd3d,
+his Direct3D 10/11 user-mode driver on NVK. `desktop/gpudesk.ps1` (`agent\gpudesk\run.flag`)
+installs them and switches the running desktop once with the one-time permit:
+
+- the OLED's display controller boot mode matches every value the driver checks for the Lite's
+  panel (logged by `swbatt`), so it takes over the boot framebuffer unchanged;
+- first try: StartDevice failed with `STATUS_NO_MEMORY` (16 MB of contiguous memory for the
+  page tables, requested late after boot); with the switch done first thing after logon it
+  started: Code 0, every start step and the panel status 0, and DWM loaded `TegraGpuD3DVk.dll`
+  and `libvulkan_nouveau.dll`;
+- the desktop worked on the GPU, in portrait (the driver does not rotate yet), until Task
+  Manager was opened: then the whole console hung (no network, no dump, swbatt's log stopped
+  within a minute). After a hard power-off the entry starts on the basic display driver again.
+
 ## Windows Update
 
 `w64.cmd` turns Windows Update off on every boot:
