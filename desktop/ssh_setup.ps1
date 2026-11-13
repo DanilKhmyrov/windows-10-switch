@@ -23,20 +23,21 @@ if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest 'install-sshd.ps1')
 }
 
-# Configuration: keys only. The key goes both to the administrators' file and to the user's own
-# file, so it works whether or not the "Match Group administrators" block matches (the group
-# name is localized on a Russian Windows).
+# Configuration: keys only; the key goes both to the administrators' file and to the user's own.
 New-Item -ItemType Directory -Force -Path $data | Out-Null
+# No "Match Group administrators" block: on a Russian Windows the group is "Администраторы" and
+# the connection was dropped before the banner. Both key files are listed instead. The log goes to
+# C:\ProgramData\ssh\logs\sshd.log (SyslogFacility LOCAL0).
 $config = @"
 Port 22
 PubkeyAuthentication yes
 PasswordAuthentication no
 PermitEmptyPasswords no
 KbdInteractiveAuthentication no
-AuthorizedKeysFile .ssh/authorized_keys
+AuthorizedKeysFile .ssh/authorized_keys __PROGRAMDATA__/ssh/administrators_authorized_keys
 Subsystem sftp sftp-server.exe
-Match Group administrators
-    AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys
+SyslogFacility LOCAL0
+LogLevel VERBOSE
 "@
 $changed = $false
 $cfgFile = Join-Path $data 'sshd_config'
