@@ -561,6 +561,11 @@ mmio_trap:
     cmp     x1, x6
     b.ne    13f
     and     x5, x5, #0xffffffffefffffff
+    // Base clock (bits 15:8): the register says 208 MHz, but UEFI clocks SDMMC1 at 48 MHz
+    // (PLLP / 8.5). sdbus divided the 208 by 6 for 50 MHz and the card ran at 8 MHz (3 MB/s).
+    // With the real 48 MHz it uses no divider: SD high speed at 48 MHz.
+    and     x5, x5, #0xffffffffffff00ff
+    orr     x5, x5, #0x3000
 13: tbnz    x0, #15, 10f            // SF: 64-bit register
     mov     w5, w5
 10: cmp     x3, #31
