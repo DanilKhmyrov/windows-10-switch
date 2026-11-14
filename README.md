@@ -541,6 +541,14 @@ installs them and switches the running desktop once with the one-time permit:
   first 3 s; with it none did, and every run was still Code 0 30 s after the shell resumed. The
   start-up race between two processes' first GPU work is therefore the trigger; its place in
   the kernel driver is still unknown.
+- With the author's newer tgd3d-vulkan (KMD 0.1.0.203) the GPU-bridge tgd3d works: a present
+  costs 0.3 ms in the user-mode driver instead of 17 ms, the desktop presents on demand when idle
+  and reached 14-19 frames/s under activity. That session hung after 10 minutes with the browser
+  and Explorer active (no tgd3d or kernel driver error in the trace).
+- KMD 0.1.0.204 adds nvgpu's `gm20b_priv_set_timeout_settings` (priv ring SYS/GPC station
+  master timeouts 0x400 -> 0x800, missing in the author's setup); without the shell workaround the
+  second of two starts still hung within 10 s, so that is not the cause of the start-up race.
+  Our patch on the author's branch: `drivers/nvk/tgd3d-local.patch`.
 
 ![Windows 11 desktop drawn by the GM20B on the Switch OLED, portrait; Task Manager shows the
 GPU "Tegra X1 (GM20B) .202" with its 3D load](docs/images/gpu-desktop-taskmanager.jpg)
