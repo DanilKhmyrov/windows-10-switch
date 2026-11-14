@@ -459,6 +459,68 @@ static VOID LogShim(VOID)
 // Display controller (DC A, 0x54200000) as UEFI left it: the registers mesa-switch-woa's WDDM
 // display driver compares with the Switch Lite's panel before it takes over the boot framebuffer
 // (platform/t214_dc.c, tg_t214_dc_has_boot_mode). Read once at start, reads only.
+// Black-box area: 0xAA0F0000, inside the shim's reserved 1 MB (0xAA000000) but above the loaded
+// bl33 image and below its stage-2 tables, so neither Hekate, the shim nor UEFI writes it and
+// Windows does not manage it. This checks whether its contents survive a reboot: a header
+// (magic, boot counter) and a 4 KB pattern derived from the counter; the count of wrong bits
+// tells how well DRAM kept it. Then a new header and pattern are written for the next boot.
+#define BLACKBOX_PAGE  0xAA0F0000ULL
+#define BLACKBOX_MAGIC 0x58425753u      // "SWBX"
+#define BLACKBOX_WORDS 1024
+
+static VOID LogHex8(ULONG value);
+
+static ULONG BlackboxPattern(ULONG seed, ULONG i)
+{
+    ULONG x = seed * 2654435761u + i * 40503u + 0x9E3779B9u;
+    x ^= x >> 15; x *= 0x2C1B3C6Du; x ^= x >> 12;
+    return x;
+}
+
+static VOID LogBlackbox(VOID)
+{
+    PHYSICAL_ADDRESS address;
+    volatile ULONG *box;
+    ULONG count, bad = 0, i;
+
+    if (!ShimPageIsReserved())          // same check: the page must not be Windows memory
+        return;
+    address.QuadPart = (LONGLONG) BLACKBOX_PAGE;
+    box = MmMapIoSpace(address, 0x2000, MmNonCached);
+    if (box == NULL)
+        return;
+    LogText("blackbox: ");
+    if (box[0] == BLACKBOX_MAGIC) {
+        count = box[1];
+        for (i = 0; i < BLACKBOX_WORDS; i++) {
+            ULONG diff = box[16 + i] ^ BlackboxPattern(count, i);
+            while (diff) { bad += diff & 1; diff >>= 1; }
+        }
+        LogText("kept from boot ");
+        LogNum((LONG) count);
+        LogText(", wrong bits ");
+        LogNum((LONG) bad);
+        LogText(" of 32768, word2=");
+        LogHex8(box[2]);
+    } else {
+        LogText("no header (word0=");
+        LogHex8(box[0]);
+        LogText(")");
+        count = 0;
+    }
+    count++;
+    for (i = 0; i < BLACKBOX_WORDS; i++)
+        box[16 + i] = BlackboxPattern(count, i);
+    box[2] = (ULONG) (KeQueryInterruptTime() / 10000);
+    box[1] = count;
+    box[0] = BLACKBOX_MAGIC;
+    KeMemoryBarrier();
+    LogText(", now boot ");
+    LogNum((LONG) count);
+    LogText("\r\n");
+    MmUnmapIoSpace((PVOID) box, 0x2000);
+}
+
 static VOID LogHex4(ULONG value);
 
 static VOID LogDisplay(VOID)
@@ -1246,6 +1308,7 @@ VOID PollThread(PVOID context)
     RtlZeroMemory(&old, sizeof(old));
     LogClocks();
     LogDisplay();
+    LogBlackbox();
     JackStart();
     UsbStart();
     SaveLog();
