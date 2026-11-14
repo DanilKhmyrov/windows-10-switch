@@ -4,14 +4,14 @@
 # Called by w64.cmd when agent\gpudesk\run.flag exists; the flag is deleted first.
 # Results: agent\gpudesk\result.txt (written through, so a hang keeps what was reached).
 #   powershell -NoProfile -ExecutionPolicy Bypass -File gpudesk.ps1 AGENT_DIR
-# agent\gpudesk: driver\ (tegragpurender 0.1.0.202: tools/build.py --display
+# agent\gpudesk: driver\ (tegragpurender 0.1.0.N, read from its INF: tools/build.py --display
 # --native-test-version 201, signed), app\ (TegraGpuD3DVk.dll in CPU-sync mode,
 # libvulkan_nouveau.dll, nvk_windows_icd.json, libunwind.dll, nvk-windows-check.exe).
 # The steps follow the author's tgd3d-default package (logon-default mode):
 #  1. install the display driver; without a permit it stays gated (the basic display driver
 #     keeps the screen);
 #  2. register tgd3d in UserModeDriverName slots 1 and 2 and the ICD as VulkanDriverName;
-#  3. one-time permit (TgGpuBootTest202.bin = 1, volatile AllowDesktopStart) and a device
+#  3. one-time permit (TgGpuBootTestN.bin = 1, volatile AllowDesktopStart) and a device
 #     restart: the driver takes over the boot framebuffer it found and DWM switches to tgd3d;
 #  4. 30 s of passive observation. A reboot always returns to the gated state.
 param([string]$Agent)
@@ -24,6 +24,9 @@ function Log([string]$text) {
 Remove-Item (Join-Path $src 'run.flag') -Force -ErrorAction SilentlyContinue
 Log "==== gpudesk $(Get-Date -Format s)"
 $id = 'ACPI\SWOA0F01\0'
+# Version of the staged driver (DriverVer in its INF): 0.1.0.N, permit file TgGpuBootTestN.bin.
+$ver = ((Get-Content (Join-Path $src 'driver\tegragpurender.inf') | Select-String '^DriverVer=') -split ',')[-1].Trim()
+$permitName = 'TgGpuBootTest' + $ver.Split('.')[-1] + '.bin'
 if (-not (Get-PnpDevice -PresentOnly -InstanceId $id -ErrorAction SilentlyContinue)) { Log 'no GPU device (not the GPU Desktop loader): kept for the next boot'; New-Item -ItemType File -Force (Join-Path $src 'run.flag') | Out-Null; exit 0 }
 # Series of runs: agent\gpudesk\runs-left.txt holds how many more boots should run this test.
 $left = Join-Path $src 'runs-left.txt'
@@ -49,7 +52,7 @@ Log '-- 1. display driver'
 $dst = 'C:\swagent\gpudesk'
 # The 16 MB of contiguous memory the driver needs is only there early after boot: when the
 # driver is already installed and registered, go straight to the switch.
-$ready = (Prop DriverVersion) -eq '0.1.0.202' -and (Test-Path "$dst\app\TegraGpuD3DVk.dll")
+$ready = (Prop DriverVersion) -eq $ver -and (Test-Path "$dst\app\TegraGpuD3DVk.dll")
 if ($ready) { Log '  already installed, switching at once'; Copy-Item (Join-Path $src 'app\*') "$dst\app" -Force } else {
 if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
 New-Item -ItemType Directory -Force "$dst\driver", "$dst\app" | Out-Null
@@ -61,7 +64,7 @@ if (-not (Test-Path "$dst\driver\tegragpurender.cat")) { Log 'no catalog, stoppe
 pnputil /add-driver "$dst\driver\tegragpurender.inf" /install 2>&1 | ForEach-Object { Log "  $_" }
 Start-Sleep -Seconds 10
 Log (State)
-if ((Prop DriverVersion) -ne '0.1.0.202') { Log 'the display driver is not bound, stopped'; exit 1 }
+if ((Prop DriverVersion) -ne $ver) { Log 'the display driver is not bound, stopped'; exit 1 }
 }
 
 Log '-- 2. tgd3d and NVK registration'
@@ -105,7 +108,7 @@ Log '-- 3. one-time switch on the running desktop'
 $svc = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Services\tegragpurender', $true)
 try {
     $data = [byte[]]::new(4096); $data[0] = 1
-    $permit = "$env:windir\System32\drivers\TgGpuBootTest202.bin"
+    $permit = "$env:windir\System32\drivers\$permitName"
     $f = [IO.FileStream]::new($permit, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read, 4096, [IO.FileOptions]::WriteThrough)
     try { $f.Write($data, 0, $data.Length); $f.Flush($true) } finally { $f.Dispose() }
     $svc.CreateSubKey('AllowDesktopStart', [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [Microsoft.Win32.RegistryOptions]::Volatile).Close()
