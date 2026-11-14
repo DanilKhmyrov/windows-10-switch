@@ -15,6 +15,11 @@ UEFI, and UEFI boots a regular Windows Boot Manager from the SD card.
 |:---:|:---:|:---:|
 | ![ARM32 desktop](docs/screenshots/arm32-desktop.jpg) | ![Windows 10 ARM64 desktop](docs/screenshots/arm64-desktop.jpg) | ![Windows 11 ARM64 desktop](docs/screenshots/win11-arm64-desktop.jpg) |
 
+**Video:** [Windows 11 on Nintendo Switch OLED: desktop running on the Tegra X1 GPU](https://www.youtube.com/watch?v=yo2r46_bz38)
+(boot from Hekate, the desktop moving to the GPU, Task Manager, Firefox).
+
+[![Windows 11 on Nintendo Switch OLED: desktop running on the Tegra X1 GPU](https://img.youtube.com/vi/yo2r46_bz38/hqdefault.jpg)](https://www.youtube.com/watch?v=yo2r46_bz38)
+
 > **The first rule of this project is not to harm the console.** Everything here was tested on one
 > Mariko unit (T210B01, the OLED model HEG-001). Clock and voltage changes stay within the limits used by
 > Horizon. Use at your own risk.
@@ -556,8 +561,15 @@ GPU first thing after logon, with the shell suspended for the first 10 s. Withou
 `run.flag` for one run) the entry stays on the basic display driver (the GPU device shows Code 43:
 the driver's start gate is closed). A hang needs a hard power-off; the next boot tries again.
 
+Do not rotate the display to landscape on the GPU desktop: the driver supports portrait only, and
+Windows saves the rotation, so every later switch ends on a black screen. To undo it, set `Rotation`
+back to 1 under `HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration\NOEDID_414F5753_*\00\00`
+and run the switch again.
+
 ![Windows 11 desktop drawn by the GM20B on the Switch OLED, portrait; Task Manager shows the
 GPU "Tegra X1 (GM20B) .202" with its 3D load](docs/images/gpu-desktop-taskmanager.jpg)
+
+Video of a full run: [youtube.com/watch?v=yo2r46_bz38](https://www.youtube.com/watch?v=yo2r46_bz38).
 
 ## Windows Update
 
