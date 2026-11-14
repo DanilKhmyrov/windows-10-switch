@@ -524,6 +524,14 @@ installs them and switches the running desktop once with the one-time permit:
   take 0.2 ms. Firefox did not use the GPU (no tgd3d events from it). Users see it as "not
   very smooth"; video stuttered at first and then played.
 
+- trials 6-7: switching to the GPU-bridge tgd3d build by restarting DWM hung at once (empty
+  trace); the next CPU-sync switch hung by itself 2.6 s after start. Both start-up hangs (trials
+  4 and 7) have the same trace shape: DWM sets the mode and presents four rotated frames, then
+  Explorer creates a second device and both submit work, and the console stops with no tgd3d error
+  and no blue screen after 5 minutes. When the start passes this phase (trials 2 and 5) the
+  desktop stays up. A race in the kernel driver between the first concurrent submissions is the
+  working hypothesis.
+
 ![Windows 11 desktop drawn by the GM20B on the Switch OLED, portrait; Task Manager shows the
 GPU "Tegra X1 (GM20B) .202" with its 3D load](docs/images/gpu-desktop-taskmanager.jpg)
 
