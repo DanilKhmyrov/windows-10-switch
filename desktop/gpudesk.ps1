@@ -118,18 +118,29 @@ foreach ($sp in $shell) { try { [void][SwGpu.Nt]::NtSuspendProcess($sp.Handle) }
 Log ("  suspended: " + (($shell | ForEach-Object { $_.ProcessName + ':' + $_.Id }) -join ', '))
 
 Log '-- 3. one-time switch on the running desktop'
+# A GPU power-up can fail once on a transient I2C5 error with the GPU PMIC (the bus is shared):
+# the driver rolls the rail back and reports HardwareStatus 0xC00000A3 (device not ready). The
+# rail is then off again, so the switch is retried, up to 3 attempts.
 $svc = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Services\tegragpurender', $true)
+$permit = "$env:windir\System32\drivers\$permitName"
 try {
-    $data = [byte[]]::new(4096); $data[0] = 1
-    $permit = "$env:windir\System32\drivers\$permitName"
-    $f = [IO.FileStream]::new($permit, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read, 4096, [IO.FileOptions]::WriteThrough)
-    try { $f.Write($data, 0, $data.Length); $f.Flush($true) } finally { $f.Dispose() }
-    $svc.CreateSubKey('AllowDesktopStart', [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [Microsoft.Win32.RegistryOptions]::Volatile).Close()
-    Log "  permit armed, restarting the device $(Get-Date -Format s)"
-    pnputil /restart-device $id 2>&1 | ForEach-Object { Log "  $_" }
-    $limit = (Get-Date).AddSeconds(20)
-    do { Start-Sleep -Milliseconds 500 } while ((Prop ProblemCode) -ne 0 -and (Get-Date) -lt $limit)
-    Log (State)
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $data = [byte[]]::new(4096); $data[0] = 1
+        $f = [IO.FileStream]::new($permit, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read, 4096, [IO.FileOptions]::WriteThrough)
+        try { $f.Write($data, 0, $data.Length); $f.Flush($true) } finally { $f.Dispose() }
+        $svc.CreateSubKey('AllowDesktopStart', [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [Microsoft.Win32.RegistryOptions]::Volatile).Close()
+        Log "  permit armed, restarting the device (attempt $attempt) $(Get-Date -Format s)"
+        pnputil /restart-device $id 2>&1 | ForEach-Object { Log "  $_" }
+        $limit = (Get-Date).AddSeconds(20)
+        do { Start-Sleep -Milliseconds 500 } while ((Prop ProblemCode) -ne 0 -and (Get-Date) -lt $limit)
+        Log (State)
+        if ((Prop ProblemCode) -eq 0) { break }
+        $hw = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\tegragpurender\Parameters" -ErrorAction SilentlyContinue).HardwareStatus
+        $hwText = if ($null -eq $hw) { 'none' } else { '{0:X8}' -f $hw }   # Int32 or Int64 alike
+        if ($hwText -ne 'C00000A3') { Log "  HardwareStatus 0x${hwText}: not retried"; break }
+        Log '  GPU power-up not ready (transient PMIC I2C error), retrying in 3 s'
+        Start-Sleep -Seconds 3
+    }
 } finally {
     $svc.DeleteSubKey('AllowDesktopStart', $false); $svc.Dispose()
 }
