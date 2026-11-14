@@ -531,6 +531,16 @@ installs them and switches the running desktop once with the one-time permit:
   and no blue screen after 5 minutes. When the start passes this phase (trials 2 and 5) the
   desktop stays up. A race in the kernel driver between the first concurrent submissions is the
   working hypothesis.
+- The kernel driver's own ETW events (decoded with a small raw dumper, `kmdtrace`) show only
+  successful preemption requests up to the end of both hang traces: no submit or worker
+  failure, no recovery request and no reset. Preemption itself never touches the hardware in
+  this driver (it waits for the running DMA buffer to retire).
+- **Workaround, confirmed 5 of 5:** `gpudesk.ps1` suspends the shell's GPU users (Explorer,
+  Start, Search, the text input host, Widgets, NtSuspendProcess) for the switch and the first
+  10 s, so DWM starts on the GPU alone, then resumes them. Without it 3 of 5 switches hung in the
+  first 3 s; with it none did, and every run was still Code 0 30 s after the shell resumed. The
+  start-up race between two processes' first GPU work is therefore the trigger; its place in
+  the kernel driver is still unknown.
 
 ![Windows 11 desktop drawn by the GM20B on the Switch OLED, portrait; Task Manager shows the
 GPU "Tegra X1 (GM20B) .202" with its 3D load](docs/images/gpu-desktop-taskmanager.jpg)
