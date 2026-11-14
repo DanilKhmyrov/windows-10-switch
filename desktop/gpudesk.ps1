@@ -100,7 +100,11 @@ Add-Type -Namespace SwGpu -Name Nt -MemberDefinition @'
 [DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr h);
 [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr h);
 '@
-$shell = Get-Process -Name explorer, ShellExperienceHost, StartMenuExperienceHost, SearchHost, TextInputHost, msedgewebview2, Widgets, PhoneExperienceHost, Taskmgr -ErrorAction SilentlyContinue
+# agent\gpudesk\nosuspend.flag turns the workaround off (to test a fix in the driver).
+$shell = @()
+if (-not (Test-Path (Join-Path $src 'nosuspend.flag'))) {
+    $shell = Get-Process -Name explorer, ShellExperienceHost, StartMenuExperienceHost, SearchHost, TextInputHost, msedgewebview2, Widgets, PhoneExperienceHost, Taskmgr -ErrorAction SilentlyContinue
+} else { Log '  nosuspend.flag: the shell is not suspended' }
 foreach ($sp in $shell) { try { [void][SwGpu.Nt]::NtSuspendProcess($sp.Handle) } catch {} }
 Log ("  suspended: " + (($shell | ForEach-Object { $_.ProcessName + ':' + $_.Id }) -join ', '))
 
