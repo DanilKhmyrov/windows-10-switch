@@ -27,7 +27,16 @@ $id = 'ACPI\SWOA0F01\0'
 # Version of the staged driver (DriverVer in its INF): 0.1.0.N, permit file TgGpuBootTestN.bin.
 $ver = ((Get-Content (Join-Path $src 'driver\tegragpurender.inf') | Select-String '^DriverVer=') -split ',')[-1].Trim()
 $permitName = 'TgGpuBootTest' + $ver.Split('.')[-1] + '.bin'
-if (-not (Get-PnpDevice -PresentOnly -InstanceId $id -ErrorAction SilentlyContinue)) { Log 'no GPU device (not the GPU Desktop loader): kept for the next boot'; New-Item -ItemType File -Force (Join-Path $src 'run.flag') | Out-Null; exit 0 }
+if (-not (Get-PnpDevice -PresentOnly -InstanceId $id -ErrorAction SilentlyContinue)) {
+    # Another loader: a one-time run waits for the next GPU Desktop boot; auto mode just skips.
+    if (Test-Path (Join-Path $src 'auto.flag')) { exit 0 }
+    Log 'no GPU device (not the GPU Desktop loader): kept for the next boot'
+    New-Item -ItemType File -Force (Join-Path $src 'run.flag') | Out-Null; exit 0
+}
+# Keep the log short in auto mode: the previous runs move to result-prev.txt.
+if ((Test-Path (Join-Path $src 'auto.flag')) -and (Test-Path $out) -and (Get-Item $out).Length -gt 200KB) {
+    Move-Item $out (Join-Path $src 'result-prev.txt') -Force
+}
 # Series of runs: agent\gpudesk\runs-left.txt holds how many more boots should run this test.
 $left = Join-Path $src 'runs-left.txt'
 if (Test-Path $left) {

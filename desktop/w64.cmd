@@ -385,7 +385,8 @@ goto :eof
 rem One-time GPU desktop test (GPU Desktop loader only) when agent\gpudesk\run.flag exists:
 rem gpudesk.ps1 installs the WDDM display driver and tgd3d and switches the running desktop once.
 :gpudesk
-if not exist %1:\agent\gpudesk\run.flag goto :eof
+rem agent\gpudesk\auto.flag: switch on every boot of the GPU Desktop loader (daily use).
+if not exist %1:\agent\gpudesk\run.flag if not exist %1:\agent\gpudesk\auto.flag goto :eof
 echo -- gpudesk >> %LOG%
 powershell -NoProfile -ExecutionPolicy Bypass -File %1:\agent\gpudesk.ps1 %1:\agent >> %LOG% 2>&1
 goto :eof

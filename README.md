@@ -550,6 +550,12 @@ installs them and switches the running desktop once with the one-time permit:
   second of two starts still hung within 10 s, so that is not the cause of the start-up race.
   Our patch on the author's branch: `drivers/nvk/tgd3d-local.patch`.
 
+**Daily use of the GPU desktop:** put `agent\gpudesk\auto.flag` on the card (with the package in
+`agent\gpudesk\`). Every boot of the "GPU Desktop" entry then switches the running desktop to the
+GPU first thing after logon, with the shell suspended for the first 10 s. Without the flag (or
+`run.flag` for one run) the entry stays on the basic display driver (the GPU device shows Code 43:
+the driver's start gate is closed). A hang needs a hard power-off; the next boot tries again.
+
 ![Windows 11 desktop drawn by the GM20B on the Switch OLED, portrait; Task Manager shows the
 GPU "Tegra X1 (GM20B) .202" with its 3D load](docs/images/gpu-desktop-taskmanager.jpg)
 
