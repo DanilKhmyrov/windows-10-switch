@@ -521,6 +521,39 @@ static VOID LogBlackbox(VOID)
     MmUnmapIoSpace((PVOID) box, 0x2000);
 }
 
+// PMC scratch candidates for a black box (APBDEV_PMC_SCRATCH190..193, PMC 0x7000E400 + 0x818):
+// no use found in hekate or Linux. Log what they hold at start (someone else's data, or our
+// label from the previous boot if they survive a reboot), then write a label for the next boot.
+static VOID LogPmcScratch(VOID)
+{
+    PHYSICAL_ADDRESS address;
+    volatile ULONG *pmc;
+    ULONG count;
+
+    address.QuadPart = 0x7000E000LL;
+    pmc = MmMapIoSpace(address, 0x1000, MmNonCached);
+    if (pmc == NULL)
+        return;
+    volatile ULONG *scratch = pmc + (0x400 + 0x818) / 4;
+    LogText("pmcscratch190-193:");
+    for (ULONG i = 0; i < 4; i++) {
+        LogText(" ");
+        LogHex8(scratch[i]);
+    }
+    LogText(" scratch0=");
+    LogHex8(pmc[(0x400 + 0x50) / 4]);
+    count = scratch[0] == BLACKBOX_MAGIC ? scratch[1] + 1 : 1;
+    scratch[1] = count;
+    scratch[2] = (ULONG) (KeQueryInterruptTime() / 10000);
+    scratch[3] = ~count;
+    scratch[0] = BLACKBOX_MAGIC;
+    (VOID) scratch[0];
+    LogText(scratch[0] == BLACKBOX_MAGIC && scratch[1] == count ? " -> label written, boot " : " -> write did not stick, boot ");
+    LogNum((LONG) count);
+    LogText("\r\n");
+    MmUnmapIoSpace((PVOID) pmc, 0x1000);
+}
+
 static VOID LogHex4(ULONG value);
 
 static VOID LogDisplay(VOID)
@@ -1309,6 +1342,7 @@ VOID PollThread(PVOID context)
     LogClocks();
     LogDisplay();
     LogBlackbox();
+    LogPmcScratch();
     JackStart();
     UsbStart();
     SaveLog();
