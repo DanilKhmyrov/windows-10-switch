@@ -24,7 +24,15 @@ function Log([string]$text) {
 Remove-Item (Join-Path $src 'run.flag') -Force -ErrorAction SilentlyContinue
 Log "==== gpudesk $(Get-Date -Format s)"
 $id = 'ACPI\SWOA0F01\0'
-if (-not (Get-PnpDevice -PresentOnly -InstanceId $id -ErrorAction SilentlyContinue)) { Log 'no GPU device, nothing done'; exit 0 }
+if (-not (Get-PnpDevice -PresentOnly -InstanceId $id -ErrorAction SilentlyContinue)) { Log 'no GPU device (not the GPU Desktop loader): kept for the next boot'; New-Item -ItemType File -Force (Join-Path $src 'run.flag') | Out-Null; exit 0 }
+# Series of runs: agent\gpudesk\runs-left.txt holds how many more boots should run this test.
+$left = Join-Path $src 'runs-left.txt'
+if (Test-Path $left) {
+    $n = [int](Get-Content $left -Raw).Trim()
+    if ($n -gt 1) { Set-Content $left ($n - 1) -Encoding ascii; New-Item -ItemType File -Force (Join-Path $src 'run.flag') | Out-Null }
+    else { Remove-Item $left -Force }
+    Log "  series: $n run(s) left including this one"
+}
 function Prop($k) { (Get-PnpDeviceProperty -InstanceId $id -KeyName "DEVPKEY_Device_$k" -ErrorAction SilentlyContinue).Data }
 function State {
     $p = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\tegragpurender\Parameters' -ErrorAction SilentlyContinue
@@ -83,6 +91,16 @@ try {
     Log "  trace session swgpu -> $etl"
 } catch { Log "  trace not started: $($_.Exception.Message)" }
 
+# Experiment: the hangs came in the first seconds, while DWM and Explorer started on the GPU
+# together. Freeze the shell's GPU users during the switch so DWM starts alone (NtSuspendProcess).
+Add-Type -Namespace SwGpu -Name Nt -MemberDefinition @'
+[DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr h);
+[DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr h);
+'@
+$shell = Get-Process -Name explorer, ShellExperienceHost, StartMenuExperienceHost, SearchHost, TextInputHost, msedgewebview2, Widgets, PhoneExperienceHost, Taskmgr -ErrorAction SilentlyContinue
+foreach ($sp in $shell) { try { [void][SwGpu.Nt]::NtSuspendProcess($sp.Handle) } catch {} }
+Log ("  suspended: " + (($shell | ForEach-Object { $_.ProcessName + ':' + $_.Id }) -join ', '))
+
 Log '-- 3. one-time switch on the running desktop'
 $svc = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Services\tegragpurender', $true)
 try {
@@ -101,6 +119,12 @@ try {
 }
 Log "  permit byte now $([IO.File]::ReadAllBytes($permit)[0]) (0 = consumed)"
 Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | ForEach-Object { Log ("  display: {0} {1} {2}" -f $_.Status, $_.InstanceId, $_.FriendlyName) }
+
+Log '  DWM alone for 10 s'
+Start-Sleep -Seconds 10
+Log ("  after 10 s: " + (State).Trim())
+foreach ($sp in $shell) { try { [void][SwGpu.Nt]::NtResumeProcess($sp.Handle) } catch {} }
+Log "  shell resumed $(Get-Date -Format s)"
 
 Log '-- 4. observation (30 s)'
 foreach ($i in 1..3) {
